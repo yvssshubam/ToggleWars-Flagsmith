@@ -38,7 +38,9 @@ python -m pytest
 python -m scripts.smoke_flagsmith
 ```
 
-Run a release (three windows, each with the venv active):
+Run a release from the command line (three windows, each with the venv active). Since step 9 the
+shop's `calculate_total` has no flag until a PR adds one through Release Autopilot, so use the flag
+name from an approved, merged PR:
 
 ```powershell
 python -m autopilot release ap_checkout_v2 --risk medium   # 1: the bot (metrics on :8000 + engine)

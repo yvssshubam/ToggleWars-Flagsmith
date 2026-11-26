@@ -9,7 +9,8 @@ import httpx
 from autopilot_sdk.flags import set_client
 from demo_shop.app import create_app
 from simulator.traffic import SKUS, make_cart, pick_user, run
-from tests.test_autopilot_sdk import FakeSDK
+from demo_shop import app as shop_module
+from tests.test_autopilot_sdk import FakeSDK, wrapped_calculate_total
 
 
 def test_cart_shape():
@@ -35,7 +36,8 @@ def test_no_staff_means_no_internal_requests():
     assert not any(pick_user(rng, 200, 0, 0.5)[1] for _ in range(500))
 
 
-def test_run_against_shop_in_process():
+def test_run_against_shop_in_process(monkeypatch):
+    monkeypatch.setattr(shop_module, "calculate_total", wrapped_calculate_total())
     events, lines = [], []
     sdk = FakeSDK()  # internal users get the new path
     app = create_app(client=sdk, sink=events.extend, metrics_url=None)

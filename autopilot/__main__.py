@@ -30,6 +30,7 @@ from dotenv import load_dotenv
 from autopilot.engine import Engine
 from autopilot.flagsmith_client import FlagsmithClient, FlagsmithError
 from autopilot.github_client import GitHubClient, GitHubError
+from autopilot.llm import GroqClient
 from autopilot.policy import TIERS, describe, for_tier
 from autopilot.pr_handler import PRHandler
 from autopilot.server import create_app
@@ -65,11 +66,16 @@ def serve(store, port, github_secret=None, github_repo=None):
 
 def run_bot(engine, store, port, tick_seconds):
     settings = github_settings()
-    handler = gh = None
+    handler = gh = llm = None
     if settings:
         token, repo, secret, approvers = settings
         gh = GitHubClient(token, repo)
-        handler = PRHandler(store, gh, approvers)
+        try:
+            llm = GroqClient.from_env()
+            print(f"AI: Groq {llm.model}")
+        except (RuntimeError, ValueError):
+            print("AI: GROQ_API_KEY not set; PRs will get 'couldn't auto-flag' instead of a plan")
+        handler = PRHandler(store, gh, approvers, llm=llm)
         server = serve(store, port, github_secret=secret, github_repo=repo)
         print(f"GitHub: watching {repo}; approvers: {', '.join(approvers) or 'NONE (nobody can approve)'}")
         print(f"        webhook endpoint http://127.0.0.1:{port}/webhooks/github "
@@ -102,6 +108,8 @@ def run_bot(engine, store, port, tick_seconds):
         server.should_exit = True
         if gh:
             gh.close()
+        if llm:
+            llm.close()
 
 
 def print_status(store, flag=None):

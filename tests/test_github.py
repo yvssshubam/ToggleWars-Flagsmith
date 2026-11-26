@@ -172,18 +172,26 @@ def test_client_errors():
 # --- PR handler --------------------------------------------------------------------
 
 class FakeGitHub:
+    repo = REPO
+
     def __init__(self, files=()):
-        self.files, self.comments, self.fail = list(files), [], 0
+        self.files, self.comments, self.edits, self.fail = list(files), [], [], 0
 
     def list_pull_files(self, number):
         if self.fail:
             self.fail -= 1
             raise GitHubError("list files", 502, "bad gateway")
-        return [{"filename": f} for f in self.files]
+        return [{"filename": f, "status": "modified"} for f in self.files]
+
+    def get_file(self, path, ref):
+        return None
 
     def post_comment(self, number, body):
         self.comments.append((number, body))
         return len(self.comments)
+
+    def edit_comment(self, comment_id, body):
+        self.edits.append((comment_id, body))
 
 
 def run_handler(files, *events, approvers=("yvssshubam",)):
@@ -200,15 +208,15 @@ def test_pr_outside_managed_app_gets_no_flag_needed():
     assert len(gh.comments) == 1 and "no flag needed" in gh.comments[0][1]
 
 
-def test_pr_in_managed_app_is_acknowledged_and_lists_files():
+def test_pr_in_managed_app_without_changed_functions_cannot_be_flagged():
     _, gh, _ = run_handler(["demo_shop/checkout.py", "README.md"], parse_event("pull_request", pr_payload()))
     body = gh.comments[0][1]
-    assert "reviewing this PR" in body and "`demo_shop/checkout.py`" in body and "README.md" not in body
-    assert "Nothing changes in Flagsmith until someone approves it" in body
+    assert "couldn't auto-flag" in body and "no existing top-level function" in body
+    assert "Nothing was created in Flagsmith" in body
 
 
-def test_new_commits_and_close_post_nothing():
-    _, gh, _ = run_handler(["demo_shop/checkout.py"],
+def test_new_commits_outside_scope_and_close_without_plan_post_nothing():
+    _, gh, _ = run_handler(["README.md"],
                            parse_event("pull_request", pr_payload("synchronize")),
                            parse_event("pull_request", pr_payload("closed", merged=True)))
     assert gh.comments == []
@@ -223,7 +231,7 @@ def test_commands_and_approver_list():
     bodies = [b for _, b in gh.comments]
     assert len(bodies) == 3  # the plain comment gets no reply
     assert "isn't on the approver list" in bodies[0] and "@stranger" in bodies[0]
-    assert "`/approve` received" in bodies[1]  # approver match ignores case
+    assert "`/approve` received, but nothing" in bodies[1]  # approver match ignores case
     assert "isn't a Release Autopilot command" in bodies[2] and "/rollback" in bodies[2]
 
 

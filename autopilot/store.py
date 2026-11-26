@@ -62,7 +62,16 @@ CREATE TABLE IF NOT EXISTS github_events (
 MAX_EVENT_ATTEMPTS = 3
 
 ACTIVE_STATES = ("stage_0", "stage_1", "stage_2", "awaiting_approval", "full")
-TERMINAL_STATES = ("released", "rolled_back", "abandoned")
+TERMINAL_STATES = ("released", "rolled_back", "abandoned", "rejected")
+# Before merge: a plan waiting for /approve, then approved and waiting for the merge.
+PLAN_STATES = ("proposed", "pending_merge")
+
+# Columns added after the first version; added to an existing autopilot.db on start.
+ADDED_COLUMNS = {
+    "pr_number": "INTEGER",        # the PR this release came from (NULL for CLI releases)
+    "plan": "TEXT",                # JSON: triage, wording, preview and /set history
+    "plan_comment_id": "INTEGER",  # the plan comment, edited as the plan changes
+}
 
 
 class Store:
@@ -73,6 +82,10 @@ class Store:
         if path != ":memory:":
             self.db.execute("PRAGMA journal_mode=WAL")
         self.db.executescript(SCHEMA)
+        have = {r["name"] for r in self.db.execute("PRAGMA table_info(releases)")}
+        for name, kind in ADDED_COLUMNS.items():
+            if name not in have:
+                self.db.execute(f"ALTER TABLE releases ADD COLUMN {name} {kind}")
 
     def close(self):
         self.db.close()
@@ -87,6 +100,29 @@ class Store:
             (flag, feature_id, segment_id, json.dumps(policy_dict), state, now, now, now),
         )
         return cur.lastrowid
+
+    def create_proposal(self, pr_number, flag, policy_dict, plan):
+        """A release plan waiting for /approve. Nothing exists in Flagsmith yet."""
+        now = self.clock()
+        cur = self.db.execute(
+            "INSERT INTO releases (flag, policy, state, pr_number, plan, created_at, updated_at)"
+            " VALUES (?, ?, 'proposed', ?, ?, ?, ?)",
+            (flag, json.dumps(policy_dict), pr_number, json.dumps(plan), now, now),
+        )
+        return cur.lastrowid
+
+    def release_for_pr(self, pr_number):
+        row = self.db.execute(
+            "SELECT * FROM releases WHERE pr_number = ? ORDER BY id DESC LIMIT 1", (pr_number,)).fetchone()
+        return dict(row) if row else None
+
+    def flag_in_use(self, flag, except_pr=None):
+        """True if another release still owns this flag name (anything but
+        rejected/abandoned plans), so a new PR must pick a different one."""
+        row = self.db.execute(
+            "SELECT 1 FROM releases WHERE flag = ? AND state NOT IN ('rejected', 'abandoned')"
+            " AND (pr_number IS NULL OR pr_number IS NOT ?) LIMIT 1", (flag, except_pr)).fetchone()
+        return row is not None
 
     def get_release(self, release_id):
         row = self.db.execute("SELECT * FROM releases WHERE id = ?", (release_id,)).fetchone()
