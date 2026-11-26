@@ -147,3 +147,31 @@ def test_from_env_reports_missing_vars(monkeypatch):
         monkeypatch.delenv(name, raising=False)
     with pytest.raises(RuntimeError, match="FS_TOKEN"):
         FlagsmithClient.from_env()
+
+
+def test_internal_or_split_rule():
+    rules = percentage_split_rules(0, include_internal=True)
+    any_rule = rules[0]["rules"][0]
+    assert any_rule["type"] == "ANY"
+    assert any_rule["conditions"] == [
+        {"operator": "EQUAL", "property": "is_internal", "value": "true"},
+        {"operator": "PERCENTAGE_SPLIT", "property": None, "value": "0"},
+    ]
+
+
+def test_segment_calls_pass_internal_rule_through():
+    fs, reqs = make_client(lambda r: httpx.Response(201 if r.method == "POST" else 200, json={"id": 7}))
+    fs.create_percentage_segment("s", 0, include_internal=True)
+    fs.set_segment_percentage(7, "s", 25, include_internal=True)
+    assert body(reqs[0])["rules"] == percentage_split_rules(0, include_internal=True)
+    assert body(reqs[1])["rules"] == percentage_split_rules(25, include_internal=True)
+
+
+def test_create_and_delete_feature():
+    fs, reqs = make_client(lambda r: httpx.Response(201 if r.method == "POST" else 204, json={"id": 42}))
+    assert fs.create_feature("ap_x", "why") == 42
+    fs.delete_feature(42)
+    assert str(reqs[0].url) == "https://api.flagsmith.com/api/v1/projects/56321/features/"
+    assert body(reqs[0]) == {"name": "ap_x", "description": "why", "default_enabled": False}
+    assert reqs[1].method == "DELETE"
+    assert str(reqs[1].url) == "https://api.flagsmith.com/api/v1/projects/56321/features/42/"

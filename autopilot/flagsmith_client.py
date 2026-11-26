@@ -5,9 +5,10 @@ notice, so keeping all paths here means a Flagsmith API change is a one-line
 fix. Documented fallback if they break: the versioning endpoints
 (POST /environments/{env}/features/{feature}/versions/, then /publish/).
 
-Every call below is ported from rollout_check.py, which passed against the
-real account on 25 Nov 2026. Calls that haven't been verified yet (creating a
-flag, trait conditions) are added in Thursday step 2, after testing them.
+Verified against the real account: everything ported from rollout_check.py
+(25 Nov 2026), re-checked with the Organisation API key by
+scripts/smoke_flagsmith.py (26 Nov). create_feature, delete_feature and the
+internal-users rule are checked by scripts/verify_step2.py.
 """
 
 import os
@@ -20,6 +21,7 @@ FUTURE_URL = "https://api.flagsmith.com/api/__future__"
 EDGE_URL = "https://edge.api.flagsmith.com/api/v1"
 TIMEOUT_SECONDS = 30
 AUTH_SCHEMES = ("Token", "Api-Key")
+INTERNAL_TRAIT = "is_internal"
 
 
 class FlagsmithError(Exception):
@@ -37,19 +39,23 @@ class FlagsmithError(Exception):
         super().__init__(f"{action} failed: {status}: {body[:500]}")
 
 
-def percentage_split_rules(percent):
-    """Segment rules matching `percent`% of identities.
+def percentage_split_rules(percent, include_internal=False):
+    """Segment rules matching `percent`% of identities, and optionally anyone
+    with trait is_internal == true (one ANY rule: internal OR in the split).
 
-    "property" must be null: the API rejects an empty string with HTTP 400.
+    "property" must be null for the split: the API rejects an empty string
+    with HTTP 400.
     """
     if not 0 <= percent <= 100:
         raise ValueError(f"percent must be between 0 and 100, got {percent}")
-    condition = {"operator": "PERCENTAGE_SPLIT", "property": None, "value": str(percent)}
+    conditions = [{"operator": "PERCENTAGE_SPLIT", "property": None, "value": str(percent)}]
+    if include_internal:
+        conditions.insert(0, {"operator": "EQUAL", "property": INTERNAL_TRAIT, "value": "true"})
     return [
         {
             "type": "ALL",
             "conditions": [],
-            "rules": [{"type": "ANY", "rules": [], "conditions": [condition]}],
+            "rules": [{"type": "ANY", "rules": [], "conditions": conditions}],
         }
     ]
 
@@ -144,6 +150,21 @@ class FlagsmithClient:
                 return feature
         return None
 
+    def create_feature(self, name, description=""):
+        """Create a flag (off by default in every environment); return its id."""
+        r = self._request(
+            self._admin, "POST", f"{API_URL}/projects/{self.project_id}/features/",
+            f"create feature {name}", ok=(200, 201),
+            json={"name": name, "description": description, "default_enabled": False},
+        )
+        return r.json()["id"]
+
+    def delete_feature(self, feature_id):
+        self._request(
+            self._admin, "DELETE", f"{API_URL}/projects/{self.project_id}/features/{feature_id}/",
+            f"delete feature {feature_id}", ok=(200, 204),
+        )
+
     def get_identity_flags(self, identifier):
         """What one user sees, read from the edge API: {flag_name: enabled}."""
         r = self._request(
@@ -188,18 +209,22 @@ class FlagsmithClient:
     def _segments_url(self):
         return f"{API_URL}/projects/{self.project_id}/segments/"
 
-    def _segment_body(self, name, percent):
-        return {"name": name, "project": self.project_id, "rules": percentage_split_rules(percent)}
+    def _segment_body(self, name, percent, include_internal):
+        return {
+            "name": name,
+            "project": self.project_id,
+            "rules": percentage_split_rules(percent, include_internal),
+        }
 
-    def create_percentage_segment(self, name, percent):
+    def create_percentage_segment(self, name, percent, include_internal=False):
         """Create a % split segment and return its id."""
         r = self._request(
             self._admin, "POST", self._segments_url(), f"create segment {name} at {percent}%",
-            ok=(200, 201), json=self._segment_body(name, percent),
+            ok=(200, 201), json=self._segment_body(name, percent, include_internal),
         )
         return r.json()["id"]
 
-    def set_segment_percentage(self, segment_id, name, percent):
+    def set_segment_percentage(self, segment_id, name, percent, include_internal=False):
         """Widen (or narrow) a split IN PLACE.
 
         Never replace the segment with a new one: buckets are only sticky
@@ -209,7 +234,7 @@ class FlagsmithClient:
         self._request(
             self._admin, "PUT", f"{self._segments_url()}{segment_id}/",
             f"set segment {segment_id} to {percent}%",
-            json=self._segment_body(name, percent),
+            json=self._segment_body(name, percent, include_internal),
         )
 
     def delete_segment(self, segment_id):
