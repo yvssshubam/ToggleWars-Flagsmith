@@ -26,9 +26,16 @@ def segment_name(flag):
     return f"{flag}_rollout"
 
 
+# Events announced to the release's PR (if it has one) through `notify`.
+ANNOUNCED = ("stage", "awaiting_approval", "full", "released", "rolled_back", "rollback_failed")
+
+
 class Engine:
-    def __init__(self, store, fs, clock=time.time, log=print):
+    def __init__(self, store, fs, clock=time.time, log=print, notify=None):
         self.store, self.fs, self.clock, self.log = store, fs, clock, log
+        # notify(release_id, kind, message, data): set by the bot to post on the PR.
+        # Never allowed to break the engine: a failing announcement is only logged.
+        self.notify = notify
 
     # --- helpers -------------------------------------------------------------
 
@@ -36,6 +43,11 @@ class Engine:
         self.store.add_event(release["id"], kind, message, data)
         if echo:
             self.log(f"[{release['flag']}] {message}")
+        if self.notify and kind in ANNOUNCED:
+            try:
+                self.notify(release["id"], kind, message, data or {})
+            except Exception as e:  # noqa: BLE001 - announcing must never stop a rollout or a switch-off
+                self.log(f"[{release['flag']}] couldn't announce {kind} on the PR: {e}")
 
     @staticmethod
     def policy_of(release):
@@ -43,16 +55,23 @@ class Engine:
 
     # --- start ---------------------------------------------------------------
 
-    def start_release(self, flag, policy, started_by):
-        """Create the flag (off) if needed, a rollout segment at internal-only,
-        and turn the flag on for that segment. Returns the release id."""
-        existing = self.store.latest_release(flag)
-        if existing and existing["state"] in ("stage_0", "stage_1", "stage_2", "awaiting_approval", "full"):
-            raise ValueError(f"{flag} already has an active release (state {existing['state']})")
-
-        feature = self.fs.get_feature_by_name(flag)
-        created = feature is None
-        feature_id = self.fs.create_feature(flag, "Managed by Release Autopilot") if created else feature["id"]
+    def start_release(self, flag, policy, started_by, release_id=None):
+        """Start stage 0: a rollout segment at internal-only, and the flag on for
+        that segment. With `release_id` (a PR's approved plan) the flag already
+        exists and the plan's policy is used; without it (CLI) the flag is
+        created if needed. Returns the release id."""
+        if release_id is not None:
+            release = self.store.get_release(release_id)
+            if release["state"] != "pending_merge" or not release["feature_id"]:
+                raise ValueError(f"release #{release_id} can't start from state {release['state']}")
+            feature_id, created, policy = release["feature_id"], False, self.policy_of(release)
+        else:
+            existing = self.store.latest_release(flag)
+            if existing and existing["state"] in ("stage_0", "stage_1", "stage_2", "awaiting_approval", "full"):
+                raise ValueError(f"{flag} already has an active release (state {existing['state']})")
+            feature = self.fs.get_feature_by_name(flag)
+            created = feature is None
+            feature_id = self.fs.create_feature(flag, "Managed by Release Autopilot") if created else feature["id"]
         segment_id = self.fs.create_percentage_segment(segment_name(flag), 0, include_internal=True)
         try:
             self.fs.enable_for_segment_only(feature_id, segment_id)
@@ -60,13 +79,18 @@ class Engine:
             self.fs.delete_segment(segment_id)  # don't leave a half-made release behind
             raise
 
-        release_id = self.store.create_release(flag, feature_id, segment_id, asdict(policy), "stage_0")
+        if release_id is None:
+            release_id = self.store.create_release(flag, feature_id, segment_id, asdict(policy), "stage_0")
+        else:
+            self.store.update_release(release_id, segment_id=segment_id, state="stage_0",
+                                      stage_started_at=self.clock())
         release = self.store.get_release(release_id)
         self._event(release, "started", f"release started by {started_by}; plan: {describe(policy)}",
                     {"by": started_by, "flag_created": created})
         if created:
             self._event(release, "flag_created", f"created flag {flag} (off for everyone)")
-        self._event(release, "stage", f"stage 0: new code on for {STAGE_LABEL['stage_0']}")
+        self._event(release, "stage", f"stage 0: new code on for {STAGE_LABEL['stage_0']}",
+                    {"stage": "stage_0", "started_by": started_by})
         return release_id
 
     # --- the loop body -------------------------------------------------------
@@ -141,7 +165,7 @@ class Engine:
         self.store.update_release(release["id"], state=next_state, stage_started_at=self.clock())
         self._event(release, "stage", f"{next_state.replace('_', ' ')}: new code on for {STAGE_LABEL[next_state]} "
                     f"(previous stage: new {verdict.new.text()}, old {verdict.old.text()})",
-                    {"new": asdict(verdict.new), "old": asdict(verdict.old)})
+                    {"stage": next_state, "new": asdict(verdict.new), "old": asdict(verdict.old)})
 
     def _go_full(self, release):
         try:
@@ -152,7 +176,7 @@ class Engine:
             return
         self.store.update_release(release["id"], state="full", stage_started_at=self.clock())
         self._event(release, "full", f"approved by {release['approved_by']}: new code on for everyone",
-                    {"by": release["approved_by"]})
+                    {"by": release["approved_by"], "soak_seconds": self.policy_of(release).soak_seconds})
 
     def _remove_override(self, release):
         try:
@@ -170,9 +194,10 @@ class Engine:
             self.fs.set_flag_for_everyone(release["feature_id"], False)
             self._remove_override(release)
         except FlagsmithError as e:
-            self._event(release, "rollback_failed",
+            first = not any(ev["kind"] == "rollback_failed" for ev in self.store.events(release["id"]))
+            self._event(release, "rollback_failed" if first else "rollback_retry",
                         f"!!! SWITCH-OFF FAILED ({e}). Retrying every tick. "
-                        "Turn the flag off in the Flagsmith dashboard if this persists.")
+                        "Turn the flag off in the Flagsmith dashboard if this persists.", {"error": str(e)})
             return
         self.store.update_release(release["id"], state="rolled_back")
         data = {"reason": reason, "stage": release["state"]}

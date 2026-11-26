@@ -63,8 +63,8 @@ MAX_EVENT_ATTEMPTS = 3
 
 ACTIVE_STATES = ("stage_0", "stage_1", "stage_2", "awaiting_approval", "full")
 TERMINAL_STATES = ("released", "rolled_back", "abandoned", "rejected")
-# Before merge: a plan waiting for /approve, then approved and waiting for the merge.
-PLAN_STATES = ("proposed", "pending_merge")
+# Before merge: a plan waiting for /approve, being carried out, then waiting for the merge.
+PLAN_STATES = ("proposed", "approving", "pending_merge")
 
 # Columns added after the first version; added to an existing autopilot.db on start.
 ADDED_COLUMNS = {
@@ -146,6 +146,15 @@ class Store:
         fields["updated_at"] = self.clock()
         cols = ", ".join(f"{k} = ?" for k in fields)
         self.db.execute(f"UPDATE releases SET {cols} WHERE id = ?", (*fields.values(), release_id))
+
+    def transition(self, release_id, from_states, to_state):
+        """Move a release to `to_state` only if it's in one of `from_states`.
+        Returns True if it moved. Atomic, so two /approve comments can't both win."""
+        marks = ",".join("?" * len(from_states))
+        cur = self.db.execute(
+            f"UPDATE releases SET state = ?, updated_at = ? WHERE id = ? AND state IN ({marks})",
+            (to_state, self.clock(), release_id, *from_states))
+        return cur.rowcount == 1
 
     def request(self, release_id, column, value, only_states):
         """Set a request column (approval, rollback) only if the release is in

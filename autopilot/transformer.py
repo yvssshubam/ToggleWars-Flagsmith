@@ -221,11 +221,7 @@ def _check(result, base_source, head_source, func_name, old_name, new_name, flag
         raise TransformError("internal error: the old version wasn't copied exactly")
     if new_name not in fns or _shape(fns[new_name]) != _shape(head_fn):
         raise TransformError("internal error: the new version wasn't copied exactly")
-    asks_flag = func_name in fns and any(
-        isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == "flag_on"
-        and len(n.args) == 1 and isinstance(n.args[0], ast.Constant) and n.args[0].value == flag_name
-        for n in ast.walk(fns[func_name]))
-    if not asks_flag:
+    if func_name not in fns or not _asks_flag(fns[func_name], flag_name):
         raise TransformError("internal error: the dispatcher is missing")
     # Everything else in the file must be exactly the PR's version.
     others = lambda t, skip: [ast.dump(n) for n in t.body  # noqa: E731
@@ -233,3 +229,34 @@ def _check(result, base_source, head_source, func_name, old_name, new_name, flag
                               and not (isinstance(n, ast.ImportFrom) and n.module == "autopilot_sdk")]
     if others(tree, {func_name, old_name, new_name}) != others(ast.parse(head_source), {func_name}):
         raise TransformError("internal error: code outside the function changed")
+
+
+def _asks_flag(node, flag_name):
+    return any(isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == "flag_on"
+               and len(n.args) == 1 and isinstance(n.args[0], ast.Constant) and n.args[0].value == flag_name
+               for n in ast.walk(node))
+
+
+def wrapper_parts(source, func_name, flag_name):
+    """The parts of a wrapped file that must stay exactly as approved: the old
+    version (the fallback) and the dispatcher (the switch). Compared on merge, so
+    commits pushed after approval can change the new version but never weaken
+    the fallback or the switch. Raises TransformError if the wrapper is gone."""
+    fns = _top_level_functions(_parse(source, "merged"))
+    old_name, new_name = f"_{func_name}__old", f"_{func_name}__new"
+    missing = [n for n in (old_name, new_name, func_name) if n not in fns]
+    if missing:
+        raise TransformError(f"`{'`, `'.join(missing)}` missing: the flag wrapper isn't there any more")
+    if not _asks_flag(fns[func_name], flag_name):
+        raise TransformError(f"`{func_name}` no longer asks the flag `{flag_name}`")
+    dispatcher = ast.dump(ast.parse(ast.unparse(fns[func_name])).body[0])
+    return {"old": _shape(fns[old_name]), "dispatcher": dispatcher}
+
+
+def function_source(source, name):
+    """Source text of a top-level function (for the diagnosis prompt), or None."""
+    try:
+        node = _top_level_functions(ast.parse(source)).get(name)
+    except SyntaxError:
+        return None
+    return ast.get_source_segment(source, node) if node else None

@@ -33,6 +33,7 @@ from autopilot.github_client import GitHubClient, GitHubError
 from autopilot.llm import GroqClient
 from autopilot.policy import TIERS, describe, for_tier
 from autopilot.pr_handler import PRHandler
+from autopilot.pr_notifier import PRNotifier
 from autopilot.server import create_app
 from autopilot.store import Store
 
@@ -75,7 +76,8 @@ def run_bot(engine, store, port, tick_seconds):
             print(f"AI: Groq {llm.model}")
         except (RuntimeError, ValueError):
             print("AI: GROQ_API_KEY not set; PRs will get 'couldn't auto-flag' instead of a plan")
-        handler = PRHandler(store, gh, approvers, llm=llm)
+        engine.notify = PRNotifier(store, gh, llm)
+        handler = PRHandler(store, gh, approvers, llm=llm, fs=engine.fs, engine=engine)
         server = serve(store, port, github_secret=secret, github_repo=repo)
         print(f"GitHub: watching {repo}; approvers: {', '.join(approvers) or 'NONE (nobody can approve)'}")
         print(f"        webhook endpoint http://127.0.0.1:{port}/webhooks/github "

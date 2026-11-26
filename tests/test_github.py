@@ -160,6 +160,20 @@ def test_client_get_file_and_missing_file():
     assert gh.get_file("missing.py", "main") is None
 
 
+def test_client_update_file_commits_to_the_branch():
+    gh, calls = make_gh(lambda r: httpx.Response(200, json={"commit": {"sha": "c0ffee"}}))
+    assert gh.update_file("demo_shop/checkout.py", "x = 1\n", "blob1", "patch-1", "msg") == "c0ffee"
+    req = calls[0]
+    assert req.method == "PUT" and str(req.url) == f"https://api.github.com/repos/{REPO}/contents/demo_shop/checkout.py"
+    body = json.loads(req.content)
+    assert body == {"message": "msg", "branch": "patch-1", "sha": "blob1",
+                    "content": base64.b64encode(b"x = 1\n").decode()}
+    gh, _ = make_gh(lambda r: httpx.Response(409, json={"message": "does not match"}))
+    with pytest.raises(GitHubError) as e:
+        gh.update_file("a.py", "x", "old-blob", "patch-1", "msg")
+    assert e.value.status_code == 409  # someone changed the file meanwhile: never overwrite
+
+
 def test_client_errors():
     gh, _ = make_gh(lambda r: httpx.Response(403, json={"message": "Resource not accessible"}))
     with pytest.raises(GitHubError) as e:

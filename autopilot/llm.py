@@ -269,6 +269,7 @@ Return:
 - functions: the top-level Python functions whose behaviour the PR changes, as file path and function name.
 - flag_name: ap_ followed by lower_snake_case describing the change, at most 40 characters.
 - risk.tier: low (copy, styling, logging), medium (ordinary logic), high (money, prices, payments, auth, data writes, deletions).
+  Anything that can change the amount a customer pays (prices, discounts, totals, taxes, fees) is always high.
 - risk.reasons: up to 5 short claims, each citing the exact file and line number shown in the diff that supports it.
 - success_metric: the business metric this change should improve or must not hurt, and why. The demo shop measures checkout conversion.
 Cite only lines that appear in the diff. Do not invent numbers or thresholds."""
@@ -368,7 +369,8 @@ Write plain, short sentences for a developer. Do not write any numbers, percenta
 durations or thresholds: the comment shows those separately, filled in by code.
 Put code identifiers in backticks.
 - summary: what the change does, one or two sentences.
-- risk_explanation: why this risk tier fits, based on the given reasons, one or two sentences.
+- risk_explanation: what could go wrong for users or the business, based on the given reasons, one or two sentences.
+  Don't name a risk tier or say low, medium or high: a reviewer may change the tier, and the comment shows it separately.
 - metric_explanation: what the success metric shows and why it matters here, one sentence."""
 
 

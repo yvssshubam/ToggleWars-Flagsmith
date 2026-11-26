@@ -8,11 +8,25 @@ changes (new commits, /set, /reject), so it always shows the current plan.
 from autopilot.policy import STAGES
 
 MAX_PREVIEW_LINES = 120
-STATUS = {
-    "proposed": "⏳ **Waiting for approval.** Nothing has been created or changed in Flagsmith.",
-    "rejected": "❌ **Rejected.** Nothing was created in Flagsmith.",
-    "abandoned": "⚪ **Closed.** Nothing was created in Flagsmith.",
-}
+def status_line(state, plan, flag, repo):
+    by = plan.get("approved_by")
+    commits = ", ".join(f"[`{sha[:7]}`](https://github.com/{repo}/commit/{sha})"
+                        for sha in plan.get("bot_commits", []))
+    if state == "proposed":
+        return "⏳ **Waiting for approval.** Nothing has been created or changed in Flagsmith."
+    if state == "approving":
+        return (f"🔧 **Approved by @{by}; being carried out.** If this doesn't change to ✅ within a "
+                "minute, the bot hit an error (see its reply below); comment `/approve` again to retry.")
+    if state == "pending_merge":
+        return (f"✅ **Approved by @{by}.** Flag `{flag}` created in Flagsmith, **off for everyone**. "
+                f"Wrapped code committed to this PR ({commits}). **The rollout starts when this PR is merged.**")
+    if state == "rejected":
+        return "❌ **Rejected.** Nothing was created in Flagsmith."
+    if state == "abandoned":
+        if plan.get("flag_deleted"):
+            return "⚪ **Closed.** The flag was deleted from Flagsmith; nothing reached users."
+        return "⚪ **Closed.** Nothing was created in Flagsmith."
+    return f"**State:** `{state}`"
 SET_NAMES = {   # what reviewers type -> Policy field
     "max_error_rate": "max_error_rate_pct",
     "max_error_increase": "max_error_increase_pp",
@@ -30,7 +44,7 @@ def line_link(repo, sha, file, line):
 def render(plan, policy, flag, state, repo, approvers):
     p = plan
     prose = p["prose"]
-    out = [f"## Release Autopilot: release plan for `{flag}`", "", STATUS.get(state, f"**State:** `{state}`"), ""]
+    out = [f"## Release Autopilot: release plan for `{flag}`", "", status_line(state, p, flag, repo), ""]
     out += [prose["summary"], ""]
 
     # --- risk -----------------------------------------------------------------
@@ -40,7 +54,10 @@ def render(plan, policy, flag, state, repo, approvers):
         tier_line += f" (set by @{p['tier_set_by']}; the AI suggested {p['tier_ai']})"
     elif p["tier_defaulted"]:
         tier_line += " (default: the AI's reasons couldn't be verified)"
-    out += [tier_line, prose["risk_explanation"], ""]
+    explanation = prose["risk_explanation"]
+    if p.get("tier_set_by"):
+        explanation = f"The AI's reasoning for its suggestion: {explanation}"
+    out += [tier_line, explanation, ""]
     for r in p["reasons"]:
         out.append(f"- {line_link(repo, p['head_sha'], r['file'], r['line'])}: {r['claim']}")
     if p["reasons"]:

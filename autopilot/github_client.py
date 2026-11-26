@@ -107,6 +107,19 @@ class GitHubClient:
             raise
         return base64.b64decode(data["content"]).decode("utf-8"), data["sha"]
 
+    # --- writes --------------------------------------------------------------
+
+    def update_file(self, path, text, blob_sha, branch, message):
+        """Commit a new version of one file to a branch. `blob_sha` is the file's
+        current blob sha (from get_file), so a concurrent change fails with 409
+        instead of being overwritten. Returns the new commit's sha."""
+        r = self._request(
+            "PUT", f"/repos/{self.repo}/contents/{path}", f"commit {path} to {branch}",
+            json={"message": message, "branch": branch, "sha": blob_sha,
+                  "content": base64.b64encode(text.encode("utf-8")).decode("ascii")},
+        )
+        return r.json()["commit"]["sha"]
+
     # --- comments ------------------------------------------------------------
 
     def post_comment(self, number, body):
