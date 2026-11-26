@@ -18,4 +18,6 @@ def calculate_total(items):
         if item["sku"] not in PRICES:
             raise UnknownItem(item["sku"])
         total += PRICES[item["sku"]] * item["qty"]
+     if total >= 30:
+        total *= 0.9
     return round(total, 2)
