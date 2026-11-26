@@ -8,7 +8,7 @@ For Thursday this wrapper is written by hand.
 import os
 import random
 import time
-
+# test
 from autopilot_sdk import flag_on
 
 PRICES = {"tea": 4.50, "coffee": 5.00, "mug": 12.00, "beans": 18.00}
