@@ -33,6 +33,14 @@ def set_client(client):
     _client = client
 
 
+def clear_client(client):
+    """Clear the client only if it's still `client`, so an app shutting down
+    can't remove a newer app's client."""
+    global _client
+    if _client is client:
+        _client = None
+
+
 def flag_on(name):
     """True if the current user should get the new code path for `name`.
 

@@ -19,10 +19,10 @@ WeMakeDevs × Flagsmith hackathon.
 
 | Path | What it is |
 |---|---|
-| `autopilot/` | The bot. `flagsmith_client.py` holds every Flagsmith Admin API call. |
+| `autopilot/` | The bot: `engine.py` (stages + switch-off rule), `health.py` (gates), `policy.py` (risk tiers), `store.py` (SQLite state + event log), `server.py` (metrics endpoint). `flagsmith_client.py` holds every Flagsmith Admin API call. |
 | `autopilot_sdk/` | Small library an app imports: `flag_on()`, user-context middleware (`X-User-Id`, `X-Internal`), metrics reporter. Flagsmith SDK in local evaluation mode. |
 | `demo_shop/` | Tiny FastAPI shop whose `/checkout` gets released. Reads only `demo_shop/.env` (server-side key), never the bot's Organisation API key. |
-| `simulator/` | Traffic simulator for the demo shop. |
+| `simulator/` | Traffic simulator for the demo shop (no Flagsmith calls). |
 | `scripts/` | One-off checks against the real Flagsmith account. |
 | `tests/` | Offline tests. |
 
@@ -38,8 +38,14 @@ python -m pytest
 python -m scripts.smoke_flagsmith
 ```
 
-Run the demo shop:
+Run a release (three windows, each with the venv active):
 
 ```powershell
-uvicorn demo_shop.app:app --port 8001 --reload
+python -m autopilot release ap_checkout_v2 --risk medium   # 1: the bot (metrics on :8000 + engine)
+python -m uvicorn demo_shop.app:app --port 8001            # 2: the shop
+python -m simulator                                        # 3: traffic
+python -m autopilot approve ap_checkout_v2                 # when it asks for approval
+python -m autopilot status
 ```
+
+`python -m uvicorn` (not `uvicorn.exe`) also works where Windows application control blocks venv launchers.

@@ -12,6 +12,8 @@ venv/
 
 # Bot state (SQLite)
 *.db
+*.db-wal
+*.db-shm
 *.sqlite3
 
 # Editors / OS

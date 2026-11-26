@@ -157,3 +157,14 @@ def test_flag_on_outside_a_request_is_false():
 def test_setup_rejects_client_side_key():
     with pytest.raises(ValueError, match="ser."):
         autopilot_sdk.setup(FastAPI(), server_key="YVBbF2u3wfxhGLS8StCbhU")
+
+
+def test_closing_an_old_app_keeps_the_newer_client():
+    import autopilot_sdk.flags as flags
+    first = autopilot_sdk.setup(FastAPI(), client=FakeSDK(), sink=lambda b: None)
+    newer_sdk = FakeSDK()
+    second = autopilot_sdk.setup(FastAPI(), client=newer_sdk, sink=lambda b: None)
+    first.close()
+    assert flags._client is newer_sdk
+    second.close()
+    assert flags._client is None

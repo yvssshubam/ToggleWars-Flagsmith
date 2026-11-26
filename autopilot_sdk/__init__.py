@@ -17,7 +17,7 @@ the Organisation API key the bot uses.
 
 from flagsmith import Flagsmith
 
-from .flags import flag_on, set_client
+from .flags import clear_client, flag_on, set_client
 from .middleware import AutopilotMiddleware
 from .reporter import Reporter
 
@@ -33,7 +33,7 @@ class Autopilot:
         self.reporter.close()
         if hasattr(self.client, "close"):
             self.client.close()
-        set_client(None)
+        clear_client(self.client)
 
 
 def setup(app, server_key=None, metrics_url=None, refresh_seconds=10, sink=None, client=None):
