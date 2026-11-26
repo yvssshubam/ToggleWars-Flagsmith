@@ -18,7 +18,9 @@ def calculate_total(items):
         if item["sku"] not in PRICES:
             raise UnknownItem(item["sku"])
         total += PRICES[item["sku"]] * item["qty"]
-    # New: 10% off orders of 30.00 or more.
-    if total >= 30:
+    # New: 15% off orders of 50.00 or more, 10% off orders of 30.00 or more.
+    if total >= 50:
+        total *= 0.85
+    elif total >= 30:
         total *= 0.9
     return round(total, 2)
