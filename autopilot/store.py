@@ -48,7 +48,18 @@ CREATE TABLE IF NOT EXISTS metrics (
     error_where TEXT
 );
 CREATE INDEX IF NOT EXISTS metrics_flag_ts ON metrics (flag, ts);
+CREATE TABLE IF NOT EXISTS github_events (
+    id INTEGER PRIMARY KEY,
+    delivery_id TEXT UNIQUE,       -- X-GitHub-Delivery; GitHub may redeliver
+    received_at REAL NOT NULL,
+    payload TEXT NOT NULL,         -- JSON of the parsed event
+    attempts INTEGER NOT NULL DEFAULT 0,
+    processed_at REAL,
+    result TEXT
+);
 """
+
+MAX_EVENT_ATTEMPTS = 3
 
 ACTIVE_STATES = ("stage_0", "stage_1", "stage_2", "awaiting_approval", "full")
 TERMINAL_STATES = ("released", "rolled_back", "abandoned")
@@ -124,6 +135,36 @@ class Store:
         rows = self.db.execute(
             "SELECT * FROM events WHERE release_id = ? ORDER BY id", (release_id,)).fetchall()
         return [dict(r) for r in rows]
+
+    # --- GitHub events (queued by the webhook, handled by the bot loop) ------
+
+    def add_github_event(self, delivery_id, event):
+        """Queue an event. Returns False if this delivery was already queued."""
+        try:
+            self.db.execute(
+                "INSERT INTO github_events (delivery_id, received_at, payload) VALUES (?, ?, ?)",
+                (delivery_id, self.clock(), json.dumps(event)))
+        except sqlite3.IntegrityError:
+            return False
+        return True
+
+    def pending_github_events(self):
+        rows = self.db.execute(
+            "SELECT * FROM github_events WHERE processed_at IS NULL AND attempts < ? ORDER BY id",
+            (MAX_EVENT_ATTEMPTS,)).fetchall()
+        return [{**dict(r), "event": json.loads(r["payload"])} for r in rows]
+
+    def finish_github_event(self, event_id, result):
+        self.db.execute("UPDATE github_events SET processed_at = ?, result = ? WHERE id = ?",
+                        (self.clock(), result, event_id))
+
+    def fail_github_event(self, event_id, error):
+        """Count a failed attempt. Returns True if it will be retried, False if
+        it has used up MAX_EVENT_ATTEMPTS."""
+        self.db.execute("UPDATE github_events SET attempts = attempts + 1, result = ? WHERE id = ?",
+                        (error[:500], event_id))
+        attempts = self.db.execute("SELECT attempts FROM github_events WHERE id = ?", (event_id,)).fetchone()[0]
+        return attempts < MAX_EVENT_ATTEMPTS
 
     # --- metrics -----------------------------------------------------------
 

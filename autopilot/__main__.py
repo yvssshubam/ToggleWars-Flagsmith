@@ -1,4 +1,4 @@
-"""Release Autopilot command line (Thursday: no GitHub yet).
+"""Release Autopilot command line.
 
     python -m autopilot release ap_checkout_v2 --risk medium   start (or resume) and run the bot
     python -m autopilot run                                    run the bot for active releases
@@ -7,30 +7,50 @@
     python -m autopilot status                                 list releases and their events
     python -m autopilot teardown ap_checkout_v2                delete the flag + segment (testing)
 
-`release` and `run` start the bot: a metrics endpoint on port 8000 (the shop
-posts to it) and the engine loop. Stop with Ctrl+C; state is kept in
-autopilot.db, so running it again resumes where it stopped. The other
-commands are one-shot and talk to the running bot through autopilot.db.
+`release` and `run` start the bot: an HTTP server on port 8000 (the shop posts
+metrics to /metrics; GitHub posts to /webhooks/github through ngrok) and the
+loop that handles GitHub events and drives releases. Stop with Ctrl+C; state
+is kept in autopilot.db, so running it again resumes where it stopped. The
+other commands are one-shot and talk to the running bot through autopilot.db.
+
+GitHub is used when .env has GITHUB_TOKEN, GITHUB_REPO and
+GITHUB_WEBHOOK_SECRET (and ALLOWED_APPROVERS); without them the bot runs in
+CLI-only mode.
 """
 
 import argparse
 import getpass
+import os
 import threading
 import time
 
 import uvicorn
+from dotenv import load_dotenv
 
 from autopilot.engine import Engine
 from autopilot.flagsmith_client import FlagsmithClient, FlagsmithError
+from autopilot.github_client import GitHubClient, GitHubError
 from autopilot.policy import TIERS, describe, for_tier
+from autopilot.pr_handler import PRHandler
 from autopilot.server import create_app
 from autopilot.store import Store
 
 DB_PATH = "autopilot.db"
 
 
-def serve_metrics(store, port):
-    config = uvicorn.Config(create_app(store), host="127.0.0.1", port=port, log_level="warning")
+def github_settings():
+    """(token, repo, secret, approvers), or None if GitHub isn't configured."""
+    token, repo, secret = (os.environ.get(n, "").strip()
+                           for n in ("GITHUB_TOKEN", "GITHUB_REPO", "GITHUB_WEBHOOK_SECRET"))
+    if not (token and repo and secret):
+        return None
+    approvers = [a for a in os.environ.get("ALLOWED_APPROVERS", "").split(",") if a.strip()]
+    return token, repo, secret, approvers
+
+
+def serve(store, port, github_secret=None, github_repo=None):
+    app = create_app(store, github_secret=github_secret, github_repo=github_repo)
+    config = uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning")
     server = uvicorn.Server(config)
     thread = threading.Thread(target=server.run, daemon=True)
     thread.start()
@@ -40,26 +60,48 @@ def serve_metrics(store, port):
         if not thread.is_alive():
             break
         time.sleep(0.1)
-    raise SystemExit(f"Couldn't start the metrics endpoint on port {port}. Is another bot running?")
+    raise SystemExit(f"Couldn't start the bot's server on port {port}. Is another bot running?")
 
 
 def run_bot(engine, store, port, tick_seconds):
-    server = serve_metrics(store, port)
-    print(f"Bot running: metrics at http://127.0.0.1:{port}/metrics, engine tick every {tick_seconds:g}s. "
+    settings = github_settings()
+    handler = gh = None
+    if settings:
+        token, repo, secret, approvers = settings
+        gh = GitHubClient(token, repo)
+        handler = PRHandler(store, gh, approvers)
+        server = serve(store, port, github_secret=secret, github_repo=repo)
+        print(f"GitHub: watching {repo}; approvers: {', '.join(approvers) or 'NONE (nobody can approve)'}")
+        print(f"        webhook endpoint http://127.0.0.1:{port}/webhooks/github "
+              f"(expose it with: ngrok http {port})")
+    else:
+        server = serve(store, port)
+        print("GitHub not configured (needs GITHUB_TOKEN, GITHUB_REPO, GITHUB_WEBHOOK_SECRET in .env): CLI-only mode")
+    print(f"Bot running: metrics at http://127.0.0.1:{port}/metrics, tick every {tick_seconds:g}s. "
           "Ctrl+C to stop (state is kept).")
+    idle_reported = False
     try:
         while True:
+            if handler:
+                try:
+                    handler.process_pending()
+                except GitHubError as e:  # never crash the loop on a GitHub hiccup
+                    print(f"GitHub error, will retry: {e}")
             try:
                 engine.tick_all()
             except FlagsmithError as e:  # never crash the loop on a Flagsmith hiccup
                 print(f"Flagsmith error, will retry: {e}")
-            if not store.active_releases():
+            idle = not store.active_releases()
+            if idle and not idle_reported:
                 print("No active releases. Waiting (Ctrl+C to stop)...")
+            idle_reported = idle
             time.sleep(tick_seconds)
     except KeyboardInterrupt:
         print("\nstopped; run the same command again to resume")
     finally:
         server.should_exit = True
+        if gh:
+            gh.close()
 
 
 def print_status(store, flag=None):
@@ -97,6 +139,7 @@ def main():
         sp.add_argument("--tick", type=float, default=5.0, help="engine tick in seconds")
     args = p.parse_args()
 
+    load_dotenv()
     store = Store(DB_PATH)
     if args.cmd == "status":
         print_status(store, args.flag)
