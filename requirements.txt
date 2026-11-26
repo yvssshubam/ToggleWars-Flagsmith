@@ -1,0 +1,9 @@
+# Pinned 26 Nov 2026 (latest on PyPI). Python 3.10+.
+httpx==0.28.1            # Flagsmith Admin API + edge API calls
+python-dotenv==1.2.4     # loads .env
+flagsmith==6.7.0         # per-user flag evaluation in autopilot_sdk (step 3)
+fastapi==0.165.0         # bot + demo shop (steps 3, 6)
+uvicorn==0.54.0          # runs the FastAPI apps
+PyGithub==2.10.0         # PR comments, commits, cleanup PR (Friday)
+pytest==9.2.0            # tests
+# LLM client: added in step 8 once the provider is chosen.
