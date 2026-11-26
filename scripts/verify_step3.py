@@ -17,8 +17,9 @@ What it does, in Production:
 The shop runs inside this script's process for convenience. In normal use it
 runs on its own and only reads demo_shop/.env.
 
-Since step 9, demo_shop/checkout.py has no flag of its own, so this script
-runs the shop with the transformer's output for a sample discount change.
+Since step 9, demo_shop/checkout.py has no flag of its own (and changes with
+every demo PR), so this script runs the shop with the transformer's output for
+a fixed copy of the pricing code plus a sample discount change.
 """
 
 import os
@@ -31,23 +32,19 @@ from flagsmith import Flagsmith
 
 from autopilot.flagsmith_client import INTERNAL_TRAIT, FlagsmithClient, FlagsmithError
 import demo_shop.app as shop_module
-from autopilot.transformer import wrap
-from demo_shop import checkout as plain_checkout
 from demo_shop.app import create_app, shop_config
+from tests.sample_checkout import wrapped_calculate_total
 
 FLAG = "ap_checkout_v2"
+SEGMENT = f"{FLAG}_verify"
 
 
 def flagged_checkout():
-    """calculate_total wrapped behind FLAG, with a 10% discount at 30+ on the new path."""
-    base = open(plain_checkout.__file__).read()
-    head = base.replace("    return round(total, 2)",
-                        "    if total >= 30:\n        total *= 0.9\n    return round(total, 2)")
-    namespace = {}
-    exec(compile(wrap(base, head, "calculate_total", FLAG), plain_checkout.__file__, "exec"), namespace)
-    namespace["UnknownItem"], namespace["PRICES"] = plain_checkout.UnknownItem, plain_checkout.PRICES
-    return namespace["calculate_total"]
-SEGMENT = f"{FLAG}_verify"
+    """A fixed copy of the plain pricing code, wrapped behind FLAG with a 10%
+    discount at 30+ on the new path (tests/sample_checkout.py)."""
+    return wrapped_calculate_total(FLAG)
+
+
 CART = {"items": [{"sku": "beans", "qty": 2}]}  # old path 36.0, new path 32.4
 NEW_TOTAL, OLD_TOTAL = 32.4, 36.0
 N_INTERNAL, N_USERS = 5, 100

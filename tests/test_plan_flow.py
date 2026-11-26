@@ -5,18 +5,16 @@ AI-answer checks, the policy and the store are the real ones."""
 import difflib
 import json
 import sqlite3
-from pathlib import Path
 
 from autopilot.flagsmith_client import FlagsmithError
 from autopilot.github_client import GitHubError
 from autopilot.pr_handler import PRHandler
 from autopilot.store import Store
 from autopilot.webhooks import parse_event
+from tests.sample_checkout import PLAIN
 from tests.test_github import REPO, comment_payload, pr_payload
 
-BASE = Path("demo_shop/checkout.py").read_text()
-# Works whether or not the file ends with a newline.
-assert BASE.count("    return round(total, 2)") == 1, "demo_shop/checkout.py isn't the plain version"
+BASE = PLAIN  # a fixed copy: demo_shop/checkout.py itself changes with every demo PR
 HEAD = BASE.replace("    return round(total, 2)",
                     "    # New: 10% off orders of 30.00 or more.\n"
                     "    if total >= 30:\n"

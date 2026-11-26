@@ -6,27 +6,14 @@ from fastapi.testclient import TestClient
 
 import autopilot_sdk
 from autopilot_sdk import flag_on
-from autopilot.transformer import wrap
 from autopilot_sdk.flags import set_client
 from demo_shop import app as shop_module
-from demo_shop import checkout as plain_checkout
 from demo_shop.app import create_app
+from tests.sample_checkout import plain_calculate_total, wrapped_calculate_total
 
-# demo_shop/checkout.py has no flag (step 9). These tests run the shop with the
-# transformer's real output for a discount PR, as the bot would commit it.
-CHECKOUT_PATH = plain_checkout.__file__
-DISCOUNT_PR = open(CHECKOUT_PATH).read().replace(
-    "    return round(total, 2)",
-    "    if total >= 30:\n        total *= 0.9\n    return round(total, 2)")
-
-
-def wrapped_calculate_total(flag="ap_checkout_v2"):
-    base = open(CHECKOUT_PATH).read()
-    namespace = {}
-    exec(compile(wrap(base, DISCOUNT_PR, "calculate_total", flag), CHECKOUT_PATH, "exec"), namespace)
-    namespace["UnknownItem"] = plain_checkout.UnknownItem  # the shop catches this exact class
-    namespace["PRICES"] = plain_checkout.PRICES
-    return namespace["calculate_total"]
+# The shop runs with a fixed copy of the pricing code wrapped behind a flag
+# (tests/sample_checkout.py), so these tests don't depend on demo_shop/checkout.py,
+# which every demo PR changes.
 
 
 @pytest.fixture(autouse=True)
@@ -146,7 +133,7 @@ def test_server_error_reports_not_ok():
 
 
 def test_plain_shop_has_no_flag(monkeypatch):
-    monkeypatch.setattr(shop_module, "calculate_total", plain_checkout.calculate_total)
+    monkeypatch.setattr(shop_module, "calculate_total", plain_calculate_total())
     events, sdk = [], FakeSDK(on_users={"u"})
     app = create_app(client=sdk, sink=events.extend, metrics_url=None)
     with TestClient(app) as client:

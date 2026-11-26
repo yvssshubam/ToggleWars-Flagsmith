@@ -10,7 +10,8 @@ from autopilot_sdk.flags import set_client
 from demo_shop.app import create_app
 from simulator.traffic import SKUS, make_cart, pick_user, run
 from demo_shop import app as shop_module
-from tests.test_autopilot_sdk import FakeSDK, wrapped_calculate_total
+from tests.sample_checkout import wrapped_calculate_total
+from tests.test_autopilot_sdk import FakeSDK
 
 
 def test_cart_shape():
