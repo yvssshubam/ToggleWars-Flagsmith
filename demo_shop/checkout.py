@@ -21,4 +21,7 @@ def calculate_total(items):
     # New: 10% off orders of 30.00 or more.
     if total >= 30:
         total *= 0.9
+    units = sum(item["qty"] for item in items)
+    if units <= 3:
+        total -= total * 0.05 / (3 - units)
     return round(total, 2)
