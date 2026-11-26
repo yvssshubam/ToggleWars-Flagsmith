@@ -8,6 +8,7 @@ AI text is the diagnosis, which llm.py has already checked against the diff.
 
 import json
 
+from autopilot import plan_comment
 from autopilot.engine import STAGE_LABEL
 from autopilot.health import PathStats
 from autopilot.llm import diagnose
@@ -37,6 +38,7 @@ class PRNotifier:
         policy = Policy(**json.loads(release["policy"]))
         body = getattr(self, f"_{kind}")(release, plan, policy, data)
         comment_id = self.gh.post_comment(release["pr_number"], body)
+        plan_comment.refresh(self.gh, release)  # the status line at the top follows the rollout
         if kind == "rolled_back":
             self._add_diagnosis(release, plan, data, body, comment_id)
 
@@ -65,8 +67,8 @@ class PRNotifier:
 
     def _released(self, release, plan, policy, data):
         return (f"🎉 **Released.** `{release['flag']}` has been on for everyone for {policy.soak_seconds}s "
-                f"with no gate failing (new path {stats(data.get('new'))}). The flag and the old code can now "
-                "be removed in a cleanup PR.")
+                f"with no gate failing (new path {stats(data.get('new'))}). Next, the bot opens a cleanup PR "
+                "that removes the flag code.")
 
     def _rollback_failed(self, release, plan, policy, data):
         return (f"🚨 **Switch-off FAILED**: {data.get('error')}. The bot retries every few seconds. "

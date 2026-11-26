@@ -260,3 +260,105 @@ def function_source(source, name):
     except SyntaxError:
         return None
     return ast.get_source_segment(source, node) if node else None
+
+
+def unwrap(source, func_name, flag_name):
+    """The reverse of wrap(), for the cleanup PR: keep the new version as `f`
+    (with the dispatcher's decorators), delete the old version and the
+    dispatcher, and drop the flag_on import if nothing else uses it.
+    unwrap(wrap(base, head, f, flag), f, flag) gives back the PR's file.
+    Raises TransformError if the file isn't wrapped with this flag."""
+    crlf = "\r\n" in source
+    source = source.replace("\r\n", "\n")
+    result = _unwrap(source, func_name, flag_name)
+    return result.replace("\n", "\r\n") if crlf else result
+
+
+def _unwrap(source, func_name, flag_name):
+    tree = _parse(source, "main")
+    old_name, new_name = f"_{func_name}__old", f"_{func_name}__new"
+    for name in (old_name, new_name, func_name):
+        count = sum(isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == name for n in tree.body)
+        if count != 1:
+            raise TransformError(f"expected one top-level `{name}`, found {count}: the file isn't wrapped as expected")
+    fns = _top_level_functions(tree)
+    old, new, dispatcher = fns[old_name], fns[new_name], fns[func_name]
+    if not _asks_flag(dispatcher, flag_name):
+        raise TransformError(f"`{func_name}` isn't switched by `{flag_name}`")
+    # Nothing but the dispatcher may use the old version, or deleting it would break the file.
+    for node in tree.body:
+        if node in (old, dispatcher):
+            continue
+        if any(isinstance(n, ast.Name) and n.id == old_name for n in ast.walk(node)):
+            raise TransformError(f"`{old_name}` is used outside the dispatcher, so it can't be removed")
+
+    lines = source.split("\n")
+
+    def start(node):  # first line, decorators included (0-based)
+        return min([node.lineno] + [d.lineno for d in node.decorator_list]) - 1
+
+    drop = set(range(start(old), old.end_lineno))
+    i = old.end_lineno
+    while i < len(lines) and not lines[i].strip():   # blank lines after the old version
+        drop.add(i)
+        i += 1
+    drop.update(range(start(dispatcher), dispatcher.end_lineno))
+    i = start(dispatcher) - 1
+    while i >= 0 and not lines[i].strip() and i not in drop:  # blank lines before the dispatcher
+        drop.add(i)
+        i -= 1
+    decorators = lines[start(dispatcher):dispatcher.lineno - 1]
+    renamed = decorators + _function_text(lines, new, func_name).split("\n")
+
+    out, i = [], 0
+    while i < len(lines):
+        if i == start(new):
+            out += renamed
+            i = new.end_lineno
+            continue
+        if i not in drop:
+            out.append(lines[i])
+        i += 1
+    result = _drop_unused_import("\n".join(out))
+    _check_unwrapped(result, source, func_name, new, dispatcher)
+    return result
+
+
+def _drop_unused_import(source):
+    tree = ast.parse(source)
+    if any(isinstance(n, ast.Name) and n.id == "flag_on" for n in ast.walk(tree)):
+        return source
+    for node in tree.body:
+        if isinstance(node, ast.ImportFrom) and node.module == "autopilot_sdk" \
+                and [(a.name, a.asname) for a in node.names] == [("flag_on", None)]:
+            lines = source.split("\n")
+            a, b = node.lineno - 1, node.end_lineno
+            before_blank = a > 0 and not lines[a - 1].strip()
+            after_blank = b < len(lines) and not lines[b].strip()
+            if a == 0 and after_blank:
+                b += 1                      # top of file: also drop the blank line after it
+            elif before_blank and after_blank:
+                a -= 1                      # after a docstring: don't leave two blank lines
+            return "\n".join(lines[:a] + lines[b:])
+    return source
+
+
+def _check_unwrapped(result, source, func_name, new, dispatcher):
+    try:
+        tree = ast.parse(result)
+        compile(result, "<unwrapped>", "exec")
+    except SyntaxError as e:
+        raise TransformError(f"internal error: the cleaned-up file isn't valid Python (line {e.lineno})") from e
+    fns = _top_level_functions(tree)
+    if f"_{func_name}__old" in fns or f"_{func_name}__new" in fns or func_name not in fns:
+        raise TransformError("internal error: the cleanup didn't leave exactly one function")
+    if _shape(fns[func_name]) != _shape(new):
+        raise TransformError("internal error: the kept function isn't the released new version")
+    if [ast.dump(d) for d in fns[func_name].decorator_list] != [ast.dump(d) for d in dispatcher.decorator_list]:
+        raise TransformError("internal error: the decorators weren't kept")
+    skip = {func_name, f"_{func_name}__old", f"_{func_name}__new"}
+    others = lambda t: [ast.dump(n) for n in t.body  # noqa: E731
+                        if not (isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name in skip)
+                        and not (isinstance(n, ast.ImportFrom) and n.module == "autopilot_sdk")]
+    if others(tree) != others(ast.parse(source)):
+        raise TransformError("internal error: code outside the function changed")

@@ -7,7 +7,7 @@ import textwrap
 import pytest
 from fastapi.testclient import TestClient
 
-from autopilot.transformer import SDK_IMPORT, TransformError, changed_functions, wrap
+from autopilot.transformer import SDK_IMPORT, TransformError, changed_functions, unwrap, wrap, wrapper_parts
 
 FLAG = "ap_checkout_v2"
 
@@ -328,3 +328,92 @@ def test_changed_functions_ignores_formatting_and_comments():
     head = BASE.replace("total = 0.0", "total = 0.0  # start at zero").replace(
         "    return 0 if total > 50 else 5", "    return (0 if total > 50 else 5)")
     assert changed_functions(BASE, head) == []
+
+
+# --- unwrap (the cleanup PR) ------------------------------------------------------
+
+DECORATED = textwrap.dedent('''\
+    import functools
+
+
+    def twice(fn):
+        return fn
+
+
+    @twice
+    # a comment between decorator and def
+    @functools.lru_cache(maxsize=None)
+    def f(x):
+        return x
+''')
+
+ROUND_TRIPS = {
+    "checkout": (BASE, HEAD, "calculate_total"),
+    "fastapi route": (ROUTE_BASE, ROUTE_HEAD, "price"),
+    "every parameter kind": ("def f(a, /, b, c=2, *rest, key, opt=None, **extra) -> dict:\n    return 1\n",
+                             "def f(a, /, b, c=2, *rest, key, opt=None, **extra) -> dict:\n    return 2\n", "f"),
+    "async": ("async def fetch(x):\n    return x + 1\n", "async def fetch(x):\n    return x + 100\n", "fetch"),
+    "multi-line def": ("def f(\n    a,\n    b,\n):\n    return a + b\n",
+                       "def f(\n    a,\n    b,\n):\n    return a * b\n", "f"),
+    "decorators": (DECORATED, DECORATED.replace("    return x\n", "    return x + 1\n"), "f"),
+    "no docstring or imports": ("def f():\n    return 1\n", "def f():\n    return 2\n", "f"),
+    "future import": ('"""Doc."""\nfrom __future__ import annotations\n\nimport os\n\n\ndef f():\n    return 1\n',
+                      '"""Doc."""\nfrom __future__ import annotations\n\nimport os\n\n\ndef f():\n    return 2\n', "f"),
+    "function in the middle": ("def a():\n    return 0\n\n\ndef f():\n    return 1\n\n\ndef z():\n    return 9\n",
+                               "def a():\n    return 0\n\n\ndef f():\n    return 2\n\n\ndef z():\n    return 9\n", "f"),
+}
+
+
+@pytest.mark.parametrize("case", ROUND_TRIPS)
+def test_unwrap_gives_back_the_prs_file_exactly(case):
+    base, head, name = ROUND_TRIPS[case]
+    wrapped = wrap(base, head, name, "ap_flag")
+    assert unwrap(wrapped, name, "ap_flag") == head
+
+
+def test_unwrap_with_windows_line_endings():
+    wrapped = wrap(BASE, HEAD, "calculate_total", FLAG).replace("\n", "\r\n")
+    assert unwrap(wrapped, "calculate_total", FLAG) == HEAD.replace("\n", "\r\n")
+
+
+def test_unwrapped_code_runs_the_released_version_without_a_flag():
+    out = unwrap(wrap(BASE, HEAD, "calculate_total", FLAG), "calculate_total", FLAG)
+    namespace = {}
+    exec(compile(out, "<unwrapped>", "exec"), namespace)
+    assert namespace["calculate_total"](CART) == 32.40
+    assert "flag_on" not in out and "_calculate_total__" not in out
+
+
+def test_unwrap_keeps_the_import_if_another_flag_still_uses_it():
+    base = BASE + "\n\ndef extra():\n    return 1\n"
+    head = HEAD + "\n\ndef extra():\n    return 2\n"
+    both = wrap(base, wrap(base, head, "calculate_total", FLAG), "extra", "ap_other")
+    out = unwrap(both, "calculate_total", FLAG)
+    assert SDK_IMPORT in out and 'flag_on("ap_other")' in out and "_calculate_total__" not in out
+
+
+def test_unwrap_keeps_new_commits_to_the_new_version():
+    wrapped = wrap(BASE, HEAD, "calculate_total", FLAG).replace("total *= 0.9", "total *= 0.85")
+    assert "total *= 0.85" in unwrap(wrapped, "calculate_total", FLAG)
+
+
+def test_unwrap_refuses_files_it_cannot_clean_safely():
+    wrapped = wrap(BASE, HEAD, "calculate_total", FLAG)
+    with pytest.raises(TransformError, match="isn't wrapped"):
+        unwrap(HEAD, "calculate_total", FLAG)
+    with pytest.raises(TransformError, match="isn't switched by"):
+        unwrap(wrapped, "calculate_total", "ap_someone_else")
+    uses_old = wrapped + "\n\ndef audit(items):\n    return _calculate_total__old(items)\n"
+    with pytest.raises(TransformError, match="used outside the dispatcher"):
+        unwrap(uses_old, "calculate_total", FLAG)
+
+
+def test_wrapper_parts_detect_changes_to_the_fallback_or_the_switch():
+    wrapped = wrap(BASE, HEAD, "calculate_total", FLAG)
+    parts = wrapper_parts(wrapped, "calculate_total", FLAG)
+    assert wrapper_parts(wrapped.replace("total *= 0.9", "total *= 0.8"), "calculate_total", FLAG) == parts
+    changed_old = wrapped.replace("def _calculate_total__old(items):\n    total = 0.0",
+                                  "def _calculate_total__old(items):\n    total = 1.0")
+    assert wrapper_parts(changed_old, "calculate_total", FLAG)["old"] != parts["old"]
+    with pytest.raises(TransformError):
+        wrapper_parts(HEAD, "calculate_total", FLAG)

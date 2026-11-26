@@ -5,7 +5,9 @@ the policy template here. The comment is re-rendered whenever the plan
 changes (new commits, /set, /reject), so it always shows the current plan.
 """
 
-from autopilot.policy import STAGES
+import json
+
+from autopilot.policy import STAGES, Policy
 
 MAX_PREVIEW_LINES = 120
 def status_line(state, plan, flag, repo):
@@ -20,6 +22,27 @@ def status_line(state, plan, flag, repo):
     if state == "pending_merge":
         return (f"✅ **Approved by @{by}.** Flag `{flag}` created in Flagsmith, **off for everyone**. "
                 f"Wrapped code committed to this PR ({commits}). **The rollout starts when this PR is merged.**")
+    stage = {"stage_0": "0 (internal staff only)", "stage_1": "1 (internal staff + 5%)",
+             "stage_2": "2 (internal staff + 25%)"}
+    if state in stage:
+        return f"🚀 **Rolling out: stage {stage[state]}.** Progress is posted below."
+    if state == "awaiting_approval":
+        return "⏸ **All stages healthy: waiting for `/approve` to release to everyone** (see below)."
+    if state == "full":
+        return "📣 **On for everyone, still being watched.** The switch-off rule still applies."
+    if state == "released":
+        return "🎉 **Released to everyone.** The bot is opening a cleanup PR to remove the flag code."
+    if state == "cleanup_pr_open":
+        return (f"🧹 **Released; cleanup PR #{plan.get('cleanup_pr_number')} is open.** Merging it removes "
+                f"the flag code, and the bot then deletes `{flag}` from Flagsmith.")
+    if state == "cleanup_merged":
+        return "🧹 **Cleanup merged; deploying.** The flag is deleted as soon as the shop runs the cleaned-up code."
+    if state == "completed":
+        return f"✅ **Completed.** Released to everyone, flag code removed, `{flag}` deleted from Flagsmith."
+    if state == "rolled_back":
+        return f"🛑 **Switched off.** `{flag}` is off for everyone; see the switch-off comment below."
+    if state == "error":
+        return f"⛔ **Rollout blocked.** `{flag}` stays off for everyone; see the comment below."
     if state == "rejected":
         return "❌ **Rejected.** Nothing was created in Flagsmith."
     if state == "abandoned":
@@ -118,3 +141,12 @@ def render(plan, policy, flag, state, repo, approvers):
     out.append(f"<sub>AI wording: {'yes' if prose.get('from_ai') else 'no (plain text from code)'} · "
                "numbers: from the policy template, not the AI.</sub>")
     return "\n".join(out)
+
+
+def refresh(gh, release, approvers=()):
+    """Re-render the plan comment so its status line matches the release's state."""
+    if not release.get("plan_comment_id") or not release.get("plan"):
+        return
+    body = render(json.loads(release["plan"]), Policy(**json.loads(release["policy"])), release["flag"],
+                  release["state"], gh.repo, sorted(approvers))
+    gh.edit_comment(release["plan_comment_id"], body)

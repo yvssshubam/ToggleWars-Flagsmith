@@ -27,12 +27,13 @@ import time
 import uvicorn
 from dotenv import load_dotenv
 
+from autopilot.cleanup import Cleanup
 from autopilot.engine import Engine
 from autopilot.flagsmith_client import FlagsmithClient, FlagsmithError
 from autopilot.github_client import GitHubClient, GitHubError
 from autopilot.llm import GroqClient
 from autopilot.policy import TIERS, describe, for_tier
-from autopilot.pr_handler import PRHandler
+from autopilot.pr_handler import PRHandler, git_pull
 from autopilot.pr_notifier import PRNotifier
 from autopilot.server import create_app
 from autopilot.store import Store
@@ -67,7 +68,7 @@ def serve(store, port, github_secret=None, github_repo=None):
 
 def run_bot(engine, store, port, tick_seconds):
     settings = github_settings()
-    handler = gh = llm = None
+    handler = gh = llm = cleanup = None
     if settings:
         token, repo, secret, approvers = settings
         gh = GitHubClient(token, repo)
@@ -77,7 +78,8 @@ def run_bot(engine, store, port, tick_seconds):
         except (RuntimeError, ValueError):
             print("AI: GROQ_API_KEY not set; PRs will get 'couldn't auto-flag' instead of a plan")
         engine.notify = PRNotifier(store, gh, llm)
-        handler = PRHandler(store, gh, approvers, llm=llm, fs=engine.fs, engine=engine)
+        cleanup = Cleanup(store, gh, engine.fs, git_pull, approvers=approvers)
+        handler = PRHandler(store, gh, approvers, llm=llm, fs=engine.fs, engine=engine, cleanup=cleanup)
         server = serve(store, port, github_secret=secret, github_repo=repo)
         print(f"GitHub: watching {repo}; approvers: {', '.join(approvers) or 'NONE (nobody can approve)'}")
         print(f"        webhook endpoint http://127.0.0.1:{port}/webhooks/github "
@@ -99,6 +101,8 @@ def run_bot(engine, store, port, tick_seconds):
                 engine.tick_all()
             except FlagsmithError as e:  # never crash the loop on a Flagsmith hiccup
                 print(f"Flagsmith error, will retry: {e}")
+            if cleanup:
+                cleanup.tick()  # handles its own GitHub/Flagsmith errors
             idle = not store.active_releases()
             if idle and not idle_reported:
                 print("No active releases. Waiting (Ctrl+C to stop)...")

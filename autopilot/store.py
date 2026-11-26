@@ -62,7 +62,9 @@ CREATE TABLE IF NOT EXISTS github_events (
 MAX_EVENT_ATTEMPTS = 3
 
 ACTIVE_STATES = ("stage_0", "stage_1", "stage_2", "awaiting_approval", "full")
-TERMINAL_STATES = ("released", "rolled_back", "abandoned", "rejected")
+TERMINAL_STATES = ("completed", "rolled_back", "abandoned", "rejected")
+# After `released`: the bot's cleanup PR is open, merged (deploying), then the flag is deleted.
+CLEANUP_STATES = ("released", "cleanup_pr_open", "cleanup_merged")
 # Before merge: a plan waiting for /approve, being carried out, then waiting for the merge.
 PLAN_STATES = ("proposed", "approving", "pending_merge")
 
@@ -71,6 +73,7 @@ ADDED_COLUMNS = {
     "pr_number": "INTEGER",        # the PR this release came from (NULL for CLI releases)
     "plan": "TEXT",                # JSON: triage, wording, preview and /set history
     "plan_comment_id": "INTEGER",  # the plan comment, edited as the plan changes
+    "cleanup_pr": "INTEGER",       # the bot's PR that removes the flag code (Phase C)
 }
 
 
@@ -116,11 +119,21 @@ class Store:
             "SELECT * FROM releases WHERE pr_number = ? ORDER BY id DESC LIMIT 1", (pr_number,)).fetchone()
         return dict(row) if row else None
 
+    def release_for_cleanup_pr(self, number):
+        row = self.db.execute("SELECT * FROM releases WHERE cleanup_pr = ? ORDER BY id DESC LIMIT 1",
+                              (number,)).fetchone()
+        return dict(row) if row else None
+
+    def releases_in(self, states):
+        marks = ",".join("?" * len(states))
+        rows = self.db.execute(f"SELECT * FROM releases WHERE state IN ({marks}) ORDER BY id", tuple(states))
+        return [dict(r) for r in rows]
+
     def flag_in_use(self, flag, except_pr=None):
         """True if another release still owns this flag name (anything but
         rejected/abandoned plans), so a new PR must pick a different one."""
         row = self.db.execute(
-            "SELECT 1 FROM releases WHERE flag = ? AND state NOT IN ('rejected', 'abandoned')"
+            "SELECT 1 FROM releases WHERE flag = ? AND state NOT IN ('rejected', 'abandoned', 'completed')"
             " AND (pr_number IS NULL OR pr_number IS NOT ?) LIMIT 1", (flag, except_pr)).fetchone()
         return row is not None
 

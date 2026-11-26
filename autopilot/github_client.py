@@ -120,6 +120,42 @@ class GitHubClient:
         )
         return r.json()["commit"]["sha"]
 
+    def branch_sha(self, branch):
+        """The commit a branch points at."""
+        r = self._request("GET", f"/repos/{self.repo}/git/ref/heads/{branch}", f"read branch {branch}")
+        return r.json()["object"]["sha"]
+
+    def create_branch(self, branch, sha):
+        """Create `branch` at commit `sha`. Returns False if it already exists."""
+        try:
+            self._request("POST", f"/repos/{self.repo}/git/refs", f"create branch {branch}", ok=(201,),
+                          json={"ref": f"refs/heads/{branch}", "sha": sha})
+        except GitHubError as e:
+            if e.status_code == 422 and "already exists" in e.body:
+                return False
+            raise
+        return True
+
+    def find_open_pull(self, branch):
+        """Number of the open PR from `branch` in this repo, or None."""
+        owner = self.repo.split("/")[0]
+        pulls = self._request("GET", f"/repos/{self.repo}/pulls", f"find PR from {branch}",
+                              params={"head": f"{owner}:{branch}", "state": "open"}).json()
+        return pulls[0]["number"] if pulls else None
+
+    def create_pull(self, title, branch, base, body):
+        """Open a PR from `branch` into `base`; if one is already open, return its number."""
+        try:
+            r = self._request("POST", f"/repos/{self.repo}/pulls", f"open PR from {branch}", ok=(201,),
+                              json={"title": title, "head": branch, "base": base,
+                                    "body": f"{BOT_MARKER}\n{body}"})
+        except GitHubError as e:
+            existing = self.find_open_pull(branch) if e.status_code == 422 else None
+            if existing:
+                return existing
+            raise
+        return r.json()["number"]
+
     # --- comments ------------------------------------------------------------
 
     def post_comment(self, number, body):

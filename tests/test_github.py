@@ -174,6 +174,35 @@ def test_client_update_file_commits_to_the_branch():
     assert e.value.status_code == 409  # someone changed the file meanwhile: never overwrite
 
 
+def test_client_branches_and_pull_requests():
+    def handler(r):
+        url, method = str(r.url), r.method
+        if method == "GET" and "/git/ref/heads/main" in url:
+            return httpx.Response(200, json={"object": {"sha": "abc"}})
+        if method == "POST" and url.endswith("/git/refs"):
+            body = json.loads(r.content)
+            if body["ref"] == "refs/heads/exists":
+                return httpx.Response(422, json={"message": "Reference already exists"})
+            return httpx.Response(201, json={"ref": body["ref"]})
+        if method == "POST" and url.endswith("/pulls"):
+            if json.loads(r.content)["head"] == "dup":
+                return httpx.Response(422, json={"message": "A pull request already exists"})
+            return httpx.Response(201, json={"number": 41})
+        if method == "GET" and "/pulls" in url:
+            assert r.url.params["head"] == "yvssshubam:dup" and r.url.params["state"] == "open"
+            return httpx.Response(200, json=[{"number": 40}])
+        return httpx.Response(500, text="unexpected")
+
+    gh, calls = make_gh(handler)
+    assert gh.branch_sha("main") == "abc"
+    assert gh.create_branch("autopilot/cleanup-ap_x", "abc") is True
+    assert json.loads(calls[-1].content) == {"ref": "refs/heads/autopilot/cleanup-ap_x", "sha": "abc"}
+    assert gh.create_branch("exists", "abc") is False
+    assert gh.create_pull("t", "autopilot/cleanup-ap_x", "main", "body") == 41
+    assert json.loads(calls[-1].content)["body"] == f"{BOT_MARKER}\nbody"
+    assert gh.create_pull("t", "dup", "main", "body") == 40  # already open: reuse it
+
+
 def test_client_errors():
     gh, _ = make_gh(lambda r: httpx.Response(403, json={"message": "Resource not accessible"}))
     with pytest.raises(GitHubError) as e:

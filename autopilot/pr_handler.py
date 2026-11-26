@@ -34,6 +34,7 @@ import subprocess
 from dataclasses import asdict
 
 from autopilot import plan_comment
+from autopilot.cleanup import CLEANUP_PREFIX
 from autopilot.flagsmith_client import FlagsmithError
 from autopilot.github_client import GitHubError
 from autopilot.llm import Triage, plan_prose, triage
@@ -78,9 +79,10 @@ def preview_diff(file, before, after):
 
 
 class PRHandler:
-    def __init__(self, store, gh, approvers, llm=None, fs=None, engine=None, deploy=git_pull, log=print):
+    def __init__(self, store, gh, approvers, llm=None, fs=None, engine=None, deploy=git_pull,
+                 cleanup=None, log=print):
         self.store, self.gh, self.llm, self.fs, self.log = store, gh, llm, fs, log
-        self.engine, self.deploy = engine, deploy
+        self.engine, self.deploy, self.cleanup = engine, deploy, cleanup
         self.approvers = {a.strip().lower() for a in approvers if a.strip()}
 
     def process_pending(self):
@@ -107,6 +109,8 @@ class PRHandler:
 
     def _on_pr(self, ev):
         number, action = ev["number"], ev["action"]
+        if ev.get("head_ref", "").startswith(CLEANUP_PREFIX):  # the bot's own cleanup PR (Phase C)
+            return self.cleanup.on_pr(ev) if self.cleanup else "cleanup_ignored"
         release = self.store.release_for_pr(number)
         if action == "closed":
             return self._on_closed(ev, release)
@@ -356,12 +360,7 @@ class PRHandler:
         return candidate
 
     def _rerender(self, release):
-        if not release.get("plan_comment_id"):
-            return
-        plan = json.loads(release["plan"])
-        body = plan_comment.render(plan, _policy_of(release), release["flag"], release["state"],
-                                   self.gh.repo, sorted(self.approvers))
-        self.gh.edit_comment(release["plan_comment_id"], body)
+        plan_comment.refresh(self.gh, release, self.approvers)
 
     # --- comments ----------------------------------------------------------------
 

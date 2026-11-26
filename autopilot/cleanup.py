@@ -1,0 +1,179 @@
+"""Phase C: after a release is stable at 100%, remove the flag (approval #3).
+
+  released -> the bot opens a cleanup PR from `autopilot/cleanup-<flag>`: the
+              released (new) version stays as `f`; the old version, the switch
+              and the flag import go (transformer.unwrap, no AI).
+           -> a human merges it (approval #3) -> `cleanup_merged`
+           -> deploy (`git pull`), and only once that worked, delete the flag
+              and its segment from Flagsmith -> `completed`.
+
+Order matters: the flag is deleted only after the shop runs code that no
+longer asks for it. Deleting it first would make the shop fall back to the old
+version (a missing flag means "old path") and undo the release.
+
+If the cleanup PR is closed without merging, nothing changes: the flag stays on
+for everyone. GitHub or Flagsmith errors are retried, at most once a minute.
+"""
+
+import json
+import time
+
+from autopilot import plan_comment
+from autopilot.flagsmith_client import FlagsmithError
+from autopilot.github_client import GitHubError
+from autopilot.transformer import TransformError, unwrap
+
+CLEANUP_PREFIX = "autopilot/cleanup-"
+RETRY_SECONDS = 60
+
+
+class Cleanup:
+    def __init__(self, store, gh, fs, deploy, clock=time.time, log=print, approvers=()):
+        self.store, self.gh, self.fs, self.deploy = store, gh, fs, deploy
+        self.clock, self.log, self.approvers = clock, log, approvers
+        self._next_try = {}  # release id -> earliest time to retry after an error
+
+    # --- the loop ----------------------------------------------------------------
+
+    def tick(self):
+        for release in self.store.releases_in(("released", "cleanup_merged")):
+            if not release.get("pr_number") or self.clock() < self._next_try.get(release["id"], 0):
+                continue  # CLI releases have no PR to clean up after
+            try:
+                if release["state"] == "released":
+                    self._open(release)
+                else:
+                    self._finish(release)
+            except (GitHubError, FlagsmithError) as e:
+                self._next_try[release["id"]] = self.clock() + RETRY_SECONDS
+                self.log(f"[{release['flag']}] cleanup step failed ({e}); retrying in {RETRY_SECONDS}s")
+
+    # --- open the cleanup PR -----------------------------------------------------------
+
+    def _open(self, release):
+        plan, flag, number = json.loads(release["plan"]), release["flag"], release["pr_number"]
+        if plan.get("cleanup_error") or plan.get("cleanup_declined"):
+            return
+        if self.fs.get_feature_by_name(flag) is None:
+            # Someone already removed the flag by hand: nothing to clean up in Flagsmith.
+            self.store.update_release(release["id"], state="completed")
+            self.store.add_event(release["id"], "completed", "flag was already deleted; no cleanup PR needed")
+            plan_comment.refresh(self.gh, self.store.get_release(release["id"]))
+            self.log(f"[{flag}] flag already deleted by hand; release marked completed")
+            return
+
+        base, branch = plan["base_ref"], f"{CLEANUP_PREFIX}{flag}"
+        cleaned = []
+        for path in sorted({p for p, _ in plan["functions"]}):
+            current = self.gh.get_file(path, base)
+            try:
+                if current is None:
+                    raise TransformError(f"`{path}` isn't on `{base}` any more")
+                text = current[0]
+                for _, name in sorted(fn for fn in plan["functions"] if fn[0] == path):
+                    text = unwrap(text, name, flag)
+            except TransformError as e:
+                plan["cleanup_error"] = str(e)
+                self.store.update_release(release["id"], plan=json.dumps(plan))
+                self.store.add_event(release["id"], "cleanup_failed", str(e))
+                self.gh.post_comment(number, (
+                    f"🧹 Couldn't prepare the cleanup PR automatically: {e}. `{flag}` stays **on for "
+                    "everyone**, so users keep the released code. Remove the flag code by hand; the flag "
+                    "can then be deleted in Flagsmith."))
+                self.log(f"[{flag}] cleanup not possible automatically: {e}")
+                return
+            cleaned.append((path, text))
+
+        self.gh.create_branch(branch, self.gh.branch_sha(base))  # False if a retry finds it already there
+        names = ", ".join(f"`{n}`" for _, n in plan["functions"])
+        for path, text in cleaned:
+            on_branch = self.gh.get_file(path, branch)
+            if on_branch and on_branch[0] == text:
+                continue  # committed on an earlier try
+            self.gh.update_file(path, text, on_branch[1], branch, (
+                f"Release Autopilot cleanup: remove flag {flag}\n\nKeeps the released version of "
+                f"{names.replace('`', '')}; removes the old version and the switch (from #{number}). "
+                "Generated by autopilot/transformer.py (no AI)."))
+        pr = self.gh.create_pull(f"Release Autopilot cleanup: remove flag {flag}", branch, base, (
+            f"## Cleanup for `{flag}` (from #{number})\n\n"
+            f"`{flag}` has been on for everyone and passed the bot's watch at 100%, so the flag code "
+            f"isn't needed any more. This PR keeps the released (new) version of {names} and removes the "
+            "old version, the switch and the flag import.\n\n"
+            "Made by `autopilot/transformer.py` (no AI) and checked by it: the kept function is exactly "
+            "the released version, its decorators are kept, and nothing else in the file changes.\n\n"
+            f"**Merging this PR is the third approval.** The bot then deploys (`git pull`) and, once the shop "
+            f"runs this code, deletes `{flag}` and its segment from Flagsmith. If you close this PR instead, "
+            "nothing changes: the flag stays on for everyone."))
+        plan["cleanup_pr_number"] = pr
+        self.store.update_release(release["id"], state="cleanup_pr_open", cleanup_pr=pr, plan=json.dumps(plan))
+        self.store.add_event(release["id"], "cleanup_pr_opened", f"cleanup PR #{pr} opened")
+        self.gh.post_comment(number, (
+            f"🧹 **Cleanup PR #{pr} opened.** It removes the flag code and keeps the released version. "
+            f"Merging it is the third approval; the bot then deletes `{flag}` from Flagsmith."))
+        plan_comment.refresh(self.gh, self.store.get_release(release["id"]))
+        self.log(f"[{flag}] cleanup PR #{pr} opened")
+
+    # --- the cleanup PR's own events (routed here by the PR handler) -------------------
+
+    def on_pr(self, ev):
+        release = self.store.release_for_cleanup_pr(ev["number"])
+        if ev["action"] != "closed" or not release or release["state"] != "cleanup_pr_open":
+            return "cleanup_pr_event"  # opening it, or the bot's own commits: nothing to do
+        flag, number = release["flag"], release["pr_number"]
+        if not ev["merged"]:
+            plan = json.loads(release["plan"])
+            plan["cleanup_declined"] = True
+            self.store.update_release(release["id"], state="released", plan=json.dumps(plan))
+            self.store.add_event(release["id"], "cleanup_declined", f"cleanup PR #{ev['number']} closed")
+            self.gh.post_comment(number, (f"Cleanup PR #{ev['number']} was closed without merging. Nothing "
+                                          f"changed: `{flag}` stays on for everyone."))
+            self.log(f"[{flag}] cleanup PR closed without merge; flag left on for everyone")
+            return "cleanup_declined"
+        self.store.update_release(release["id"], state="cleanup_merged")
+        self.store.add_event(release["id"], "cleanup_merged", f"cleanup PR #{ev['number']} merged")
+        self._finish(self.store.get_release(release["id"]))
+        return "cleanup_merged"
+
+    # --- after the merge: deploy, then delete the flag ---------------------------------
+
+    def _finish(self, release):
+        plan, flag, number = json.loads(release["plan"]), release["flag"], release["pr_number"]
+        ok, output = self.deploy()
+        if not ok:
+            self._next_try[release["id"]] = self.clock() + RETRY_SECONDS
+            if not plan.get("cleanup_deploy_warned"):
+                plan["cleanup_deploy_warned"] = True
+                self.store.update_release(release["id"], plan=json.dumps(plan))
+                self.gh.post_comment(number, (
+                    f"Cleanup merged, but `git pull` in the shop's folder failed:\n```\n{output}\n```\n"
+                    f"`{flag}` is **kept on for everyone** until the shop runs the cleaned-up code, so users "
+                    "keep the released version. The bot retries every minute; run `git pull` there yourself "
+                    "to speed it up."))
+            self.log(f"[{flag}] cleanup deploy failed; flag kept, retrying: {output[-200:]}")
+            return
+        # Belt and braces: the code on main must no longer ask for this flag.
+        for path in sorted({p for p, _ in plan["functions"]}):
+            current = self.gh.get_file(path, plan["base_ref"])
+            if current and f'flag_on("{flag}")' in current[0]:
+                self._next_try[release["id"]] = self.clock() + RETRY_SECONDS
+                self.log(f"[{flag}] {path} on {plan['base_ref']} still asks for the flag; not deleting it")
+                return
+        if release.get("segment_id"):
+            try:
+                self.fs.delete_segment(release["segment_id"])
+            except FlagsmithError as e:
+                if e.status_code != 404:
+                    raise
+        if release.get("feature_id"):
+            try:
+                self.fs.delete_feature(release["feature_id"])
+            except FlagsmithError as e:
+                if e.status_code != 404:
+                    raise
+        self.store.update_release(release["id"], state="completed")
+        self.store.add_event(release["id"], "completed", f"flag {flag} and its segment deleted after cleanup")
+        self.gh.post_comment(number, (
+            f"✅ **Completed.** The cleanup is deployed and `{flag}` and its segment were deleted from "
+            "Flagsmith. The released code is now plain code with no flag."))
+        plan_comment.refresh(self.gh, self.store.get_release(release["id"]))
+        self.log(f"[{flag}] completed: deployed, flag and segment deleted")
