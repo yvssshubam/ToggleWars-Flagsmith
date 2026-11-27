@@ -118,7 +118,10 @@ def detail(store, release, clock, repo=None):
     for e in out["events"]:
         if e["kind"] == "diagnosis":  # the full section is on the PR; the log shows its gist
             d = _diagnosis([e])
-            e["message"] = f"AI diagnosis: {d['cause']}" + (f" (confidence {d['confidence']})" if d["confidence"] else "")
+            if d is None:  # an empty entry (e.g. from an interrupted run): show it, don't fail the page
+                e["message"] = "AI diagnosis: (no text recorded)"
+            else:
+                e["message"] = f"AI diagnosis: {d['cause']}" + (f" (confidence {d['confidence']})" if d["confidence"] else "")
     start = next((e["ts"] for e in events if e["kind"] == "stage"), None)
     out["series"], out["markers"] = [], []
     if start is None:

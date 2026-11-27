@@ -191,3 +191,13 @@ def test_unavailable_diagnosis_is_shown_as_such():
     env.stage(new=60, old=300, new_errors=20)
     [r] = client_for(env).get("/api/releases").json()
     assert r["diagnosis"]["cause"].startswith("Diagnosis unavailable (Groq rate limit)")
+
+
+def test_empty_diagnosis_entry_does_not_break_the_page():
+    env = Env()
+    env.approve_and_merge()
+    env.store.add_event(env.release()["id"], "diagnosis", "")
+    r = client_for(env).get(f"/api/releases/{env.release()['id']}")
+    assert r.status_code == 200
+    assert [e["message"] for e in r.json()["events"] if e["kind"] == "diagnosis"] == ["AI diagnosis: (no text recorded)"]
+    assert r.json()["diagnosis"] is None
