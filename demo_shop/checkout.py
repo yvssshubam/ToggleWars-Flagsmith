@@ -23,4 +23,8 @@ def calculate_total(items):
         total *= 0.75
     elif total >= 30:
         total *= 0.8
+    # New: extra discount for small carts, growing as the cart fills up.
+    units = sum(item["qty"] for item in items)
+    if units <= 3:
+        total -= total * 0.05 / (3 - units)
     return round(total, 2)
