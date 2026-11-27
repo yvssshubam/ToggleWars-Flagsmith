@@ -51,8 +51,8 @@ def github_settings():
     return token, repo, secret, approvers
 
 
-def serve(store, port, github_secret=None, github_repo=None):
-    app = create_app(store, github_secret=github_secret, github_repo=github_repo)
+def serve(store, port, github_secret=None, github_repo=None, engine=None):
+    app = create_app(store, github_secret=github_secret, github_repo=github_repo, engine=engine)
     config = uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning")
     server = uvicorn.Server(config)
     thread = threading.Thread(target=server.run, daemon=True)
@@ -80,13 +80,14 @@ def run_bot(engine, store, port, tick_seconds):
         engine.notify = PRNotifier(store, gh, llm)
         cleanup = Cleanup(store, gh, engine.fs, git_pull, approvers=approvers)
         handler = PRHandler(store, gh, approvers, llm=llm, fs=engine.fs, engine=engine, cleanup=cleanup)
-        server = serve(store, port, github_secret=secret, github_repo=repo)
+        server = serve(store, port, github_secret=secret, github_repo=repo, engine=engine)
         print(f"GitHub: watching {repo}; approvers: {', '.join(approvers) or 'NONE (nobody can approve)'}")
         print(f"        webhook endpoint http://127.0.0.1:{port}/webhooks/github "
               f"(expose it with: ngrok http {port})")
     else:
-        server = serve(store, port)
+        server = serve(store, port, engine=engine)
         print("GitHub not configured (needs GITHUB_TOKEN, GITHUB_REPO, GITHUB_WEBHOOK_SECRET in .env): CLI-only mode")
+    print(f"Dashboard: http://localhost:{port}/dashboard (this computer only)")
     print(f"Bot running: metrics at http://127.0.0.1:{port}/metrics, tick every {tick_seconds:g}s. "
           "Ctrl+C to stop (state is kept).")
     idle_reported = False

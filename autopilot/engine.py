@@ -126,15 +126,7 @@ class Engine:
             self._advance(release, verdict)
 
     def _judge(self, release, policy):
-        since = release["stage_started_at"]
-        new = self.store.metrics_since(release["flag"], since, "new")
-        if release["state"] == "full":
-            baseline = PathStats(**json.loads(release["baseline_old"])) if release["baseline_old"] else None
-            if baseline is None:
-                return Verdict("wait", "no old-path baseline recorded", PathStats(), PathStats())
-            return evaluate(new, [], policy, baseline_old=baseline)
-        old = self.store.metrics_since(release["flag"], since, "old")
-        return evaluate(new, old, policy)
+        return judge(self.store, release, policy)
 
     # --- transitions ---------------------------------------------------------
 
@@ -261,6 +253,19 @@ class Engine:
             self.store.add_event(release["id"], "abandoned", "torn down from the CLI")
             done.append("marked the release abandoned")
         return done
+
+
+def judge(store, release, policy):
+    """The health verdict for the release's current stage (also shown on the dashboard)."""
+    since = release["stage_started_at"]
+    new = store.metrics_since(release["flag"], since, "new")
+    if release["state"] == "full":
+        baseline = PathStats(**json.loads(release["baseline_old"])) if release["baseline_old"] else None
+        if baseline is None:
+            return Verdict("wait", "no old-path baseline recorded", PathStats(), PathStats())
+        return evaluate(new, [], policy, baseline_old=baseline)
+    old = store.metrics_since(release["flag"], since, "old")
+    return evaluate(new, old, policy)
 
 
 def rollback_report(release, reason, verdict, error_samples):

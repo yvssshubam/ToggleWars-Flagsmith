@@ -18,6 +18,15 @@ from autopilot.transformer import function_source
 STAGE_NUMBER = {"stage_0": 0, "stage_1": 1, "stage_2": 2}
 
 
+def who(by):
+    """'@login' for a GitHub approver, 'the dashboard' for the dashboard button."""
+    if not by:
+        return "someone"
+    if by == "dashboard":
+        return "the dashboard"
+    return by if by.startswith("@") or " " in by else f"@{by}"
+
+
 def stats(d):
     """'60 requests, 33.3% errors, p95 5 ms' (numbers measured by the engine)."""
     if not d:
@@ -61,7 +70,7 @@ class PRNotifier:
                 "`/rollback` to switch it off. Nothing changes until then.")
 
     def _full(self, release, plan, policy, data):
-        return (f"**Released to everyone**, approved by @{data.get('by')}. The bot keeps watching for "
+        return (f"**Released to everyone**, approved by {who(data.get('by'))}. The bot keeps watching for "
                 f"{policy.soak_seconds}s, against the old path's numbers from stage 2; the switch-off rule "
                 "still applies.")
 

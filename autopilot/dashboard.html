@@ -1,0 +1,310 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Release Autopilot</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<style>
+  :root {
+    --bg: #0f1115; --panel: #171a21; --panel2: #1d212a; --line: #2a2f3a; --text: #e6e8ee;
+    --muted: #8b93a3; --new: #7c6cff; --old: #8b93a3; --ok: #2fb86b; --wait: #e0a43b; --bad: #ef5350;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 14px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+         background: var(--bg); color: var(--text); }
+  header { display: flex; align-items: baseline; gap: 14px; padding: 16px 24px; border-bottom: 1px solid var(--line); }
+  header h1 { font-size: 18px; margin: 0; letter-spacing: .2px; }
+  header .sub { color: var(--muted); }
+  header .live { margin-left: auto; color: var(--muted); font-size: 12px; }
+  header .live .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--ok);
+                      margin-right: 6px; vertical-align: middle; }
+  header .live.stale .dot { background: var(--bad); }
+  main { display: grid; grid-template-columns: 320px 1fr; min-height: calc(100vh - 58px); }
+  aside { border-right: 1px solid var(--line); padding: 12px; overflow-y: auto; max-height: calc(100vh - 58px); }
+  .card { padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; margin-bottom: 8px;
+          background: var(--panel); cursor: pointer; }
+  .card:hover { border-color: #3a4150; }
+  .card.sel { border-color: var(--new); box-shadow: 0 0 0 1px var(--new) inset; }
+  .card .flag { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 12.5px; word-break: break-all; }
+  .card .meta { color: var(--muted); font-size: 12px; margin-top: 4px; display: flex; gap: 8px; flex-wrap: wrap; }
+  .mini { display: flex; gap: 2px; margin-top: 8px; }
+  .mini span { flex: 1; height: 4px; border-radius: 2px; background: var(--line); }
+  .mini span.done { background: var(--new); } .mini span.stop { background: var(--bad); }
+  .pill { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 12px; border: 1px solid var(--line); }
+  .pill.live { color: var(--new); border-color: var(--new); }
+  .pill.good { color: var(--ok); border-color: var(--ok); }
+  .pill.bad { color: var(--bad); border-color: var(--bad); }
+  .pill.wait { color: var(--wait); border-color: var(--wait); }
+  section.detail { padding: 20px 28px; overflow-y: auto; max-height: calc(100vh - 58px); }
+  .title { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+  .title h2 { margin: 0; font: 600 17px ui-monospace, SFMono-Regular, Consolas, monospace; }
+  .title a { color: var(--new); text-decoration: none; }
+  .subtitle { color: var(--muted); margin: 4px 0 16px; }
+  .steps { display: flex; margin: 8px 0 20px; }
+  .step { flex: 1; text-align: center; font-size: 11.5px; color: var(--muted); position: relative; padding-top: 18px; }
+  .step::before { content: ""; position: absolute; top: 5px; left: 0; right: 0; height: 2px; background: var(--line); }
+  .step::after { content: ""; position: absolute; top: 0; left: calc(50% - 6px); width: 12px; height: 12px;
+                 border-radius: 50%; background: var(--panel2); border: 2px solid var(--line); }
+  .step.done { color: var(--text); } .step.done::before { background: var(--new); }
+  .step.done::after { background: var(--new); border-color: var(--new); }
+  .step.cur::after { box-shadow: 0 0 0 4px rgba(124,108,255,.25); }
+  .step.stop { color: var(--bad); } .step.stop::after { background: var(--bad); border-color: var(--bad); }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 10px; margin-bottom: 14px; }
+  .tile { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; }
+  .tile .k { color: var(--muted); font-size: 12px; }
+  .tile .v { font-size: 18px; font-weight: 600; margin-top: 2px; font-variant-numeric: tabular-nums; }
+  .tile .v small { font-size: 12px; color: var(--muted); font-weight: 400; }
+  .bar { height: 6px; background: var(--line); border-radius: 3px; margin-top: 8px; overflow: hidden; }
+  .bar > div { height: 100%; background: var(--new); }
+  .verdict { padding: 10px 12px; border-radius: 8px; border: 1px solid var(--line); margin-bottom: 14px; }
+  .verdict.pass { border-color: var(--ok); } .verdict.wait { border-color: var(--wait); }
+  .verdict.fail { border-color: var(--bad); }
+  .actions { display: flex; gap: 10px; align-items: center; margin: 4px 0 18px; flex-wrap: wrap; }
+  button { font: inherit; padding: 8px 14px; border-radius: 8px; border: 1px solid var(--line); cursor: pointer;
+           background: var(--panel2); color: var(--text); }
+  button.primary { background: var(--new); border-color: var(--new); color: #fff; font-weight: 600; }
+  button.danger { border-color: var(--bad); color: var(--bad); }
+  button:disabled { opacity: .5; cursor: default; }
+  .msg { color: var(--muted); font-size: 13px; }
+  .charts { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-bottom: 18px; }
+  .chart { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; height: 240px; }
+  .chart h3 { margin: 0 0 6px; font-size: 13px; font-weight: 600; color: var(--muted); }
+  .chart canvas { max-height: 200px; }
+  .legend { font-size: 12px; color: var(--muted); margin: -6px 0 12px; }
+  .legend b { color: var(--new); } .legend i { color: var(--old); font-style: normal; font-weight: 700; }
+  h4 { margin: 18px 0 8px; font-size: 13px; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: .5px; }
+  .timeline { border-left: 2px solid var(--line); padding-left: 14px; }
+  .ev { margin-bottom: 8px; }
+  .ev .t { color: var(--muted); font: 12px ui-monospace, SFMono-Regular, Consolas, monospace; margin-right: 8px; }
+  .ev .kind { font-size: 11px; color: var(--muted); border: 1px solid var(--line); border-radius: 4px; padding: 0 5px; margin-right: 6px; }
+  .ev.bad .kind { color: var(--bad); border-color: var(--bad); }
+  .ev.good .kind { color: var(--ok); border-color: var(--ok); }
+  .empty { max-width: 560px; margin: 80px auto; text-align: center; color: var(--muted); }
+  .empty h2 { color: var(--text); font-size: 20px; }
+  .empty ol { text-align: left; display: inline-block; }
+  .note { color: var(--muted); font-size: 12px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Release Autopilot</h1>
+  <span class="sub" id="repo"></span>
+  <span class="live" id="live"><span class="dot"></span><span id="liveText">connecting…</span></span>
+</header>
+<main id="main">
+  <aside id="list"></aside>
+  <section class="detail" id="detail"></section>
+</main>
+<script>
+const TOKEN = "__DASHBOARD_TOKEN__";
+const REPO = "__REPO__";
+let selected = null, lastOk = 0, charts = {}, busy = false;
+
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const pct = (v) => v == null ? "–" : v.toFixed(1) + "%";
+const ms = (v) => v == null ? "–" : Math.round(v) + " ms";
+const clock = (ts) => new Date(ts * 1000).toLocaleTimeString([], {hour: "2-digit", minute: "2-digit", second: "2-digit"});
+const code = (s) => esc(s).replace(/`([^`]+)`/g, "<code>$1</code>");
+const mmss = (s) => s < 0 ? "" : `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
+
+function pillClass(r) {
+  if (r.stopped) return "bad";
+  if (["completed", "released", "cleanup_pr_open", "cleanup_merged"].includes(r.state)) return "good";
+  if (["proposed", "approving", "pending_merge", "awaiting_approval"].includes(r.state)) return "wait";
+  return "live";
+}
+
+function mini(r) {
+  return `<div class="mini">${r.steps.map((_, i) =>
+    `<span class="${i < r.step || (i === r.step && !r.stopped) ? "done" : (i === r.step && r.stopped ? "stop" : "")}"></span>`).join("")}</div>`;
+}
+
+function renderList(releases) {
+  if (!releases.length) {
+    $("list").innerHTML = "";
+    $("detail").innerHTML = `<div class="empty"><h2>No releases yet</h2>
+      <p>Open a PR on the demo shop (<code>demo_shop/</code>) and Release Autopilot will propose a release plan on it.</p>
+      <ol><li>The bot triages the PR and posts a plan.</li><li>You approve it with <code>/approve</code>.</li>
+      <li>Merge: the rollout starts and shows up here, live.</li></ol></div>`;
+    return;
+  }
+  if (selected == null || !releases.some(r => r.id === selected)) {
+    const live = releases.find(r => r.gate || r.state === "awaiting_approval");
+    selected = (live || releases[0]).id;
+  }
+  $("list").innerHTML = releases.map(r => `
+    <div class="card ${r.id === selected ? "sel" : ""}" data-id="${r.id}">
+      <div class="flag">${esc(r.flag)}</div>
+      <div class="meta"><span class="pill ${pillClass(r)}">${esc(r.state_text)}</span>
+        ${r.pr_number ? `<span>PR #${r.pr_number}</span>` : `<span>CLI</span>`}<span>${esc(r.tier)} risk</span></div>
+      ${mini(r)}
+    </div>`).join("");
+  document.querySelectorAll(".card").forEach(c => c.onclick = () => { selected = +c.dataset.id; refresh(); });
+}
+
+function stepsHtml(r) {
+  return `<div class="steps">${r.steps.map((label, i) => {
+    let cls = i < r.step ? "done" : "";
+    if (i === r.step) cls = r.stopped ? "stop" : "done cur";
+    return `<div class="step ${cls}">${esc(label)}</div>`;
+  }).join("")}</div>`;
+}
+
+function gateHtml(r) {
+  const g = r.gate;
+  if (!g) {
+    if (!(r.stopped && r.rollback_reason)) return "";
+    const d = r.diagnosis;
+    return `<div class="verdict fail"><b>Switched off:</b> ${esc(r.rollback_reason)}
+      ${d ? `<div style="margin-top:6px"><b>AI diagnosis${d.confidence ? ` (confidence ${esc(d.confidence)})` : ""}:</b>
+        ${code(d.cause)} ${r.pr_url ? `<a href="${r.pr_url}" target="_blank" rel="noopener" style="color:var(--new)">full diagnosis and suggested fix on the PR ↗</a>` : ""}</div>` : ""}</div>`;
+  }
+  const soak = Math.min(100, 100 * g.elapsed / g.soak), need = r.policy.min_new_requests;
+  const sample = Math.min(100, 100 * g.new.n / need), full = r.state === "full";
+  return `
+    <div class="grid">
+      <div class="tile"><div class="k">Stage</div><div class="v">${esc(g.stage_label)}</div></div>
+      <div class="tile"><div class="k">Soak</div><div class="v">${Math.min(g.elapsed, g.soak)}s <small>/ ${g.soak}s</small></div>
+        <div class="bar"><div style="width:${soak}%"></div></div></div>
+      <div class="tile"><div class="k">New-path requests</div><div class="v">${g.new.n} <small>/ ${need} needed</small></div>
+        <div class="bar"><div style="width:${sample}%"></div></div></div>
+      <div class="tile"><div class="k">Errors: new vs ${full ? "old (stage 2)" : "old"}</div>
+        <div class="v">${pct(g.new.error_rate)} <small>vs ${pct(g.old.error_rate)} · limit ${r.policy.max_error_rate_pct}%</small></div></div>
+      <div class="tile"><div class="k">p95: new vs ${full ? "old (stage 2)" : "old"}</div>
+        <div class="v">${ms(g.new.p95_ms)} <small>vs ${ms(g.old.p95_ms)} · limit ${r.policy.max_p95_ratio}×</small></div></div>
+    </div>
+    <div class="verdict ${g.status}">${verdictText(r, g)}</div>`;
+}
+
+function verdictText(r, g) {
+  if (g.status === "fail") return `<b>Failing:</b> ${esc(g.reason)}. The flag is being switched off.`;
+  if (g.status === "wait") return `<b>Waiting:</b> ${esc(g.reason)}`;
+  const left = g.soak - g.elapsed;
+  const next = r.state === "full" ? "released" : r.state === "stage_2" ? "the approval request" : "the next stage";
+  return `<b>Healthy:</b> every gate passes. ${left > 0 ? `Moves on to ${next} in ${left}s if it stays healthy.`
+                                                       : `Moving on to ${next} at the next check.`}`;
+}
+
+function actionsHtml(r) {
+  if (!r.can_approve && !r.can_switch_off) return "";
+  return `<div class="actions">
+    ${r.can_approve ? `<button class="primary" id="approveBtn">Approve: release to everyone</button>` : ""}
+    ${r.can_switch_off ? `<button class="danger" id="offBtn">Switch off now</button>` : ""}
+    <span class="msg" id="actionMsg">Same as <code>/approve</code> and <code>/rollback</code> on the PR; recorded there too.</span></div>`;
+}
+
+function timelineHtml(events) {
+  const bad = ["rolled_back", "rollback_failed", "blocked", "deploy_failed", "cleanup_failed"];
+  const good = ["released", "completed", "approved", "plan_approved", "full"];
+  return `<h4>Event log</h4><div class="timeline">${events.slice().reverse().map(e => `
+    <div class="ev ${bad.includes(e.kind) ? "bad" : good.includes(e.kind) ? "good" : ""}">
+      <span class="t">${clock(e.ts)}</span><span class="kind">${esc(e.kind)}</span>${code(e.message.split("\n")[0])}
+    </div>`).join("")}</div>`;
+}
+
+const markerPlugin = {
+  id: "markers",
+  afterDatasetsDraw(chart, _, opts) {
+    const {ctx, chartArea: a, scales: {x}} = chart;
+    (opts.list || []).forEach(m => {
+      const px = x.getPixelForValue(m.t);
+      if (px < a.left || px > a.right) return;
+      ctx.save(); ctx.strokeStyle = "rgba(139,147,163,.45)"; ctx.setLineDash([4, 4]);
+      ctx.beginPath(); ctx.moveTo(px, a.top); ctx.lineTo(px, a.bottom); ctx.stroke();
+      ctx.setLineDash([]); ctx.fillStyle = "#8b93a3"; ctx.font = "11px system-ui"; ctx.fillText(m.label, px + 4, a.top + 10);
+      ctx.restore();
+    });
+  }
+};
+
+function drawChart(id, series, key, markers, unit, limit) {
+  if (typeof Chart === "undefined") return;
+  const pts = (path) => series.filter(p => p[path]).map(p => ({x: p.t, y: p[path][key]}));
+  const dot = series.length < 4 ? 3 : 0;  // a line needs two points; show dots until there are a few
+  const data = {datasets: [
+    {label: "new path", data: pts("new"), borderColor: "#7c6cff", backgroundColor: "#7c6cff", tension: .25, pointRadius: dot, borderWidth: 2},
+    {label: "old path", data: pts("old"), borderColor: "#8b93a3", backgroundColor: "#8b93a3", tension: .25, pointRadius: dot, borderWidth: 2, borderDash: [5, 4]},
+  ]};
+  const xMax = Math.max(60, (series.length ? series[series.length - 1].t : 0) + 10);
+  if (limit != null && series.length) {
+    data.datasets.push({label: "switch-off limit", data: [{x: 0, y: limit}, {x: xMax, y: limit}],
+                        borderColor: "#ef5350", borderWidth: 1, borderDash: [3, 3], pointRadius: 0});
+  }
+  if (charts[id]) {
+    charts[id].data = data; charts[id].options.plugins.markers.list = markers;
+    charts[id].options.scales.x.max = xMax; charts[id].update("none"); return;
+  }
+  charts[id] = new Chart($(id), {
+    type: "line", data, plugins: [markerPlugin],
+    options: {
+      animation: false, maintainAspectRatio: false, parsing: false,
+      scales: {
+        x: {type: "linear", min: 0, max: xMax, ticks: {color: "#8b93a3", callback: (v) => mmss(v)}, grid: {color: "#232833"}},
+        y: {beginAtZero: true, ticks: {color: "#8b93a3", callback: (v) => v + unit}, grid: {color: "#232833"}},
+      },
+      plugins: {legend: {display: false}, markers: {list: markers},
+                tooltip: {callbacks: {title: (i) => mmss(i[0].parsed.x)}}},
+    },
+  });
+}
+
+function renderDetail(r) {
+  Object.values(charts).forEach(c => c.destroy()); charts = {};
+  const sub = [r.title, r.pr_number ? `PR #${r.pr_number}` : "started from the command line",
+               r.cleanup_pr ? `cleanup PR #${r.cleanup_pr}` : ""].filter(Boolean).join(" · ");
+  $("detail").innerHTML = `
+    <div class="title"><h2>${esc(r.flag)}</h2>
+      <span class="pill ${pillClass(r)}">${esc(r.state_text)}</span><span class="pill">${esc(r.tier)} risk</span>
+      ${r.pr_url ? `<a href="${r.pr_url}" target="_blank" rel="noopener">open PR #${r.pr_number} ↗</a>` : ""}</div>
+    <div class="subtitle">${esc(sub)}</div>
+    ${stepsHtml(r)}${gateHtml(r)}${actionsHtml(r)}
+    ${r.series.length ? `
+      <div class="legend"><b>━</b> new path &nbsp; <i>┅</i> old path &nbsp; <span style="color:var(--bad)">┄</span> switch-off limit &nbsp;·&nbsp; 10-second buckets; dashed vertical lines mark stage changes</div>
+      <div class="charts">
+        <div class="chart"><h3>Error rate</h3><canvas id="errChart"></canvas></div>
+        <div class="chart"><h3>p95 latency</h3><canvas id="latChart"></canvas></div>
+      </div>
+      ${typeof Chart === "undefined" ? `<p class="note">The chart library couldn't load (no internet?); the numbers above are live.</p>` : ""}`
+      : `<p class="note">The chart appears once the rollout starts (after the PR is merged).</p>`}
+    ${timelineHtml(r.events)}`;
+  if (r.series.length) {
+    drawChart("errChart", r.series, "error_rate", r.markers, "%", r.policy.max_error_rate_pct);
+    drawChart("latChart", r.series, "p95_ms", r.markers, " ms", null);
+  }
+  const act = async (path, question) => {
+    if (busy || !confirm(question)) return;
+    busy = true; $("actionMsg").textContent = "sending…";
+    try {
+      const res = await fetch(`/api/releases/${r.id}/${path}`, {method: "POST", headers: {"X-Dashboard-Token": TOKEN}});
+      const body = await res.json();
+      $("actionMsg").textContent = body.message || body.error || res.statusText;
+    } catch (e) { $("actionMsg").textContent = "couldn't reach the bot: " + e; }
+    busy = false; setTimeout(refresh, 500);
+  };
+  if ($("approveBtn")) $("approveBtn").onclick = () => act("approve", `Release ${r.flag} to everyone?`);
+  if ($("offBtn")) $("offBtn").onclick = () => act("switch-off", `Switch ${r.flag} off for everyone now?`);
+}
+
+let lastDetailKey = "";
+async function refresh() {
+  try {
+    const releases = await (await fetch("/api/releases")).json();
+    renderList(releases);
+    if (selected != null && releases.length) {
+      const r = await (await fetch(`/api/releases/${selected}`)).json();
+      const key = JSON.stringify([r.state, r.gate, r.series.length, r.events.length, r.can_approve, r.can_switch_off]);
+      if (key !== lastDetailKey || !$("errChart")) { if (!busy) renderDetail(r); lastDetailKey = key; }
+    }
+    lastOk = Date.now();
+  } catch (e) { /* shown by the live indicator */ }
+  const age = Math.round((Date.now() - lastOk) / 1000);
+  $("live").className = "live" + (age > 10 ? " stale" : "");
+  $("liveText").textContent = lastOk ? (age > 10 ? `bot not answering (${age}s)` : "live") : "connecting…";
+}
+$("repo").textContent = REPO ? `Flagsmith · ${REPO}` : "Flagsmith";
+refresh(); setInterval(refresh, 3000);
+</script>
+</body>
+</html>
