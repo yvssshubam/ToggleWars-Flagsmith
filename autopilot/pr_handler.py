@@ -35,6 +35,7 @@ from dataclasses import asdict
 
 from autopilot import plan_comment
 from autopilot.cleanup import CLEANUP_PREFIX
+from autopilot.fix_pr import FIX_PREFIX
 from autopilot.flagsmith_client import FlagsmithError
 from autopilot.github_client import GitHubError
 from autopilot.llm import Triage, plan_prose, triage
@@ -80,9 +81,9 @@ def preview_diff(file, before, after):
 
 class PRHandler:
     def __init__(self, store, gh, approvers, llm=None, fs=None, engine=None, deploy=git_pull,
-                 cleanup=None, log=print):
+                 cleanup=None, fixes=None, log=print):
         self.store, self.gh, self.llm, self.fs, self.log = store, gh, llm, fs, log
-        self.engine, self.deploy, self.cleanup = engine, deploy, cleanup
+        self.engine, self.deploy, self.cleanup, self.fixes = engine, deploy, cleanup, fixes
         self.approvers = {a.strip().lower() for a in approvers if a.strip()}
 
     def process_pending(self):
@@ -112,6 +113,12 @@ class PRHandler:
         if ev.get("head_ref", "").startswith(CLEANUP_PREFIX):  # the bot's own cleanup PR (Phase C)
             return self.cleanup.on_pr(ev) if self.cleanup else "cleanup_ignored"
         release = self.store.release_for_pr(number)
+        if release and _is_fix(release):  # the bot's fix PR after a switch-off (step 14)
+            handled = self.fixes.on_pr(ev, release) if self.fixes else "fix_ignored"
+            if handled is not None:
+                return handled
+        elif ev.get("head_ref", "").startswith(FIX_PREFIX):
+            return "fix_pr_unknown"  # never triage the bot's own fix branch as a new change
         if action == "closed":
             return self._on_closed(ev, release)
         if release and release["state"] in ("approving", "pending_merge"):
@@ -219,7 +226,14 @@ class PRHandler:
             "Merged. **Deploy:** `git pull` in the shop's folder "
             + ("succeeded." if ok else f"**failed**:\n```\n{output}\n```\nRun `git pull` there yourself. "
                "Until the shop runs the new code, the rollout simply waits for traffic.")))
-        # 3. Stage 0. The engine announces it on the PR.
+        # 3. A fix PR restarts the switched-off flag: its old rollout segment goes first.
+        if _is_fix(release) and plan.get("old_segment_id") and self.fs is not None:
+            try:
+                self.fs.delete_segment(plan["old_segment_id"])
+            except FlagsmithError as e:
+                if e.status_code != 404:  # 404: already gone
+                    raise
+        # 4. Stage 0. The engine announces it on the PR.
         self.engine.start_release(flag, None, started_by=f"merge of PR #{number}", release_id=release["id"])
         self.log(f"[github] PR #{number}: merged; deploy {'ok' if ok else 'FAILED'}; rollout of {flag} started")
         return "rollout_started"
@@ -401,6 +415,8 @@ class PRHandler:
         return f"command:{name}"
 
     def _approve(self, release, author):
+        if _is_fix(release):
+            return self._approve_fix(release, author)
         number, flag = release["pr_number"], release["flag"]
         if self.fs is None:
             self.gh.post_comment(number, f"@{author} the bot isn't connected to Flagsmith, so it can't "
@@ -515,6 +531,44 @@ class PRHandler:
         self.log(f"[github] PR #{number}: {name} from @{author}: {reply}")
         return f"rollout:{name}"
 
+    def _approve_fix(self, release, author):
+        """Approve a fix PR: the flag and the wrapper already exist, so nothing is created
+        or committed. Checks the PR and the flag, then waits for the merge."""
+        number, flag, plan = release["pr_number"], release["flag"], json.loads(release["plan"])
+        if release["state"] != "proposed":
+            return "fix_not_proposed"
+        if self.fs is None:
+            self.gh.post_comment(number, f"@{author} the bot isn't connected to Flagsmith; nothing changed.")
+            return "no_flagsmith"
+        pr = self.gh.get_pull(number)
+        head_repo = ((pr.get("head") or {}).get("repo") or {}).get("full_name")
+        why = None
+        if pr.get("state") != "open" or pr.get("merged"):
+            why = "the PR isn't open any more"
+        elif head_repo != self.gh.repo:
+            why = "the PR comes from a fork"
+        elif pr["head"]["sha"] != plan["head_sha"]:
+            why = "the PR has new commits that haven't been re-checked yet; try again in a few seconds"
+        else:
+            feature = self.fs.get_feature_by_name(flag)
+            if feature is None or feature["id"] != release["feature_id"]:
+                why = f"`{flag}` isn't the flag the switched-off release used any more (missing or replaced in Flagsmith)"
+        if why:
+            self.gh.post_comment(number, f"Approval not carried out: {why}. Nothing changed.")
+            self.log(f"[github] PR #{number}: fix approval not carried out ({why})")
+            return "fix_approve_refused"
+        if not self.store.transition(release["id"], ("proposed",), "pending_merge"):
+            return "approve_race"
+        plan["approved_by"] = author
+        self.store.update_release(release["id"], plan=json.dumps(plan))
+        self.store.add_event(release["id"], "plan_approved", f"fix approved by @{author}", {"by": author})
+        self._rerender(self.store.get_release(release["id"]))
+        self.gh.post_comment(number, (
+            f"Fix approved by @{author}. `{flag}` stays **off for everyone**; **when this PR is merged**, the rollout "
+            "restarts from the internal stage with the same plan, and the release to everyone needs a second `/approve`."))
+        self.log(f"[github] PR #{number}: fix for {flag} approved by @{author}; waiting for merge")
+        return "fix_approved"
+
     def _back_to_proposed(self, release, why):
         """Undo the start of an approval that couldn't go ahead. Only used before
         anything was created or committed."""
@@ -571,6 +625,10 @@ class PRHandler:
         self.gh.post_comment(number, f"Plan updated: {change}. The plan comment above shows the new values.")
         self.log(f"[github] PR #{number}: {change}")
         return "set"
+
+
+def _is_fix(release):
+    return json.loads(release.get("plan") or "{}").get("kind") == "fix"
 
 
 def _policy_of(release):

@@ -139,17 +139,19 @@ class PRNotifier:
     def _add_diagnosis(self, release, plan, data, body, comment_id):
         if not data.get("new"):
             return  # a manual /rollback: no failing measurements to explain
+        fix = None
         try:
-            section = self._diagnosis_section(release, plan, data)
+            section, fix = self._diagnosis_section(release, plan, data)
         except Exception as e:  # noqa: BLE001 - the numbers comment stays whatever happens here
             section = f"### Diagnosis\nDiagnosis unavailable ({type(e).__name__}: {e}). The numbers above stand."
         self.gh.edit_comment(comment_id, body.replace("_Diagnosis: working on it…_", section))
-        self.store.add_event(release["id"], "diagnosis", section[:2000])
+        # A fix located on exact lines is kept as data, so the fix PR (fix_pr.py) applies exactly what this shows.
+        self.store.add_event(release["id"], "diagnosis", section[:2000], {"fix": fix} if fix else None)
         self.log(f"[{release['flag']}] diagnosis added to the switch-off comment on PR #{release['pr_number']}")
 
     def _diagnosis_section(self, release, plan, data):
         if self.llm is None:
-            return "### Diagnosis\nDiagnosis unavailable (GROQ_API_KEY isn't set). The numbers above stand."
+            return "### Diagnosis\nDiagnosis unavailable (GROQ_API_KEY isn't set). The numbers above stand.", None
         number, flag = release["pr_number"], release["flag"]
         files = self.gh.list_pull_files(number)
         sha = (plan.get("bot_commits") or [plan.get("head_sha")])[-1]
@@ -162,7 +164,7 @@ class PRNotifier:
         d = diagnose(self.llm, files, data.get("reason", ""), verdict_text, data.get("error_samples", []),
                      name, old_src, new_src)
         if not d.available:
-            return f"### Diagnosis\nDiagnosis unavailable ({d.error}). The numbers above stand."
+            return f"### Diagnosis\nDiagnosis unavailable ({d.error}). The numbers above stand.", None
         link = lambda f, n: f"[`{f}:{n}`](https://github.com/{self.gh.repo}/blob/{sha}/{f}#L{n})"  # noqa: E731
         out = ["### Diagnosis (AI, every cited line checked against this PR's diff)", "",
                f"**Likely cause:** {d.likely_cause}", ""]
@@ -179,4 +181,9 @@ class PRNotifier:
             out += [f"- {n}" for n in d.notes] + ["", "</details>"]
         out += ["", f"<sub>The diagnosis only explains; it never changes the flag. `{flag}` stays off "
                     "until a new PR goes through the plan and approvals again.</sub>"]
-        return "\n".join(out)
+        fix = None
+        if d.fix_code and d.fix_file:  # only a fix pinned to lines in the diff can become a fix PR
+            fix = {"file": d.fix_file, "start": d.fix_start, "end": d.fix_end, "code": d.fix_code,
+                   "description": d.fix_description, "cause": d.likely_cause, "confidence": d.confidence,
+                   "sha": sha}
+        return "\n".join(out), fix

@@ -10,10 +10,19 @@ import json
 from autopilot.policy import STAGES, Policy
 
 MAX_PREVIEW_LINES = 120
+
+
 def status_line(state, plan, flag, repo):
     by = plan.get("approved_by")
     commits = ", ".join(f"[`{sha[:7]}`](https://github.com/{repo}/commit/{sha})"
                         for sha in plan.get("bot_commits", []))
+    if plan.get("kind") == "fix":  # a fix PR reuses the switched-off release's flag
+        if state == "proposed":
+            return (f"⏳ **Waiting for approval.** `{flag}` stays **off for everyone** until this fix is approved "
+                    "and merged.")
+        if state == "pending_merge":
+            return (f"✅ **Fix approved by @{by}.** `{flag}` is still off. **When this PR is merged, its rollout "
+                    "restarts from the internal stage** with the same plan.")
     if state == "proposed":
         return "⏳ **Waiting for approval.** Nothing has been created or changed in Flagsmith."
     if state == "approving":
@@ -87,15 +96,25 @@ def render(plan, policy, flag, state, repo, approvers):
         out.append("")
 
     # --- what gets flagged --------------------------------------------------------
-    out.append("### What gets put behind the flag")
-    for file, name in p["functions"]:
-        out.append(f"- `{name}` in `{file}`: the old and the new version both ship, and the flag "
-                   f"`{flag}` decides per user which one runs. Everyone gets the old version until the rollout starts.")
+    fix = p.get("kind") == "fix"
+    if fix:
+        out.append("### What this fix changes")
+        for file, name in p["functions"]:
+            out.append(f"- Only the new version, `_{name}__new` in `{file}`, which `{flag}` switches on. The old "
+                       "version and the switch are unchanged, so everyone keeps getting the old version until the "
+                       "rollout restarts.")
+    else:
+        out.append("### What gets put behind the flag")
+        for file, name in p["functions"]:
+            out.append(f"- `{name}` in `{file}`: the old and the new version both ship, and the flag "
+                       f"`{flag}` decides per user which one runs. Everyone gets the old version until the rollout starts.")
     preview = p["preview"].split("\n")
     shown = preview[:MAX_PREVIEW_LINES]
     if len(preview) > MAX_PREVIEW_LINES:
         shown.append(f"... ({len(preview) - MAX_PREVIEW_LINES} more lines)")
-    out += ["", "<details><summary>Preview: the code the bot will commit to this PR after <code>/approve</code></summary>",
+    summary = ("Preview: the fix, against main" if fix else
+               "Preview: the code the bot will commit to this PR after <code>/approve</code>")
+    out += ["", f"<details><summary>{summary}</summary>",
             "", "```diff", *shown, "```", "", "</details>", ""]
 
     # --- rollout (numbers from the policy) -----------------------------------------
@@ -133,7 +152,9 @@ def render(plan, policy, flag, state, repo, approvers):
         who = ", ".join(f"@{a}" for a in approvers) or "nobody (ALLOWED_APPROVERS is empty)"
         names = ", ".join(f"`{n}`" for n in SET_NAMES)
         out += [f"**Commands** (approvers: {who}):",
-                "- `/approve`: wrap the code as previewed, commit it to this PR, and create the flag (off).",
+                ("- `/approve`: approve this fix (no new flag, nothing to wrap). When the PR is merged, the rollout "
+                 f"of `{flag}` restarts from the internal stage." if fix else
+                 "- `/approve`: wrap the code as previewed, commit it to this PR, and create the flag (off)."),
                 "- `/reject`: drop this plan.",
                 "- `/set risk low|medium|high`: switch to another risk template.",
                 f"- `/set <name> <value>` to change one threshold ({names}); safety bounds can't be loosened.",

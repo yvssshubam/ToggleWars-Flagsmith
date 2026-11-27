@@ -28,6 +28,7 @@ import uvicorn
 from dotenv import load_dotenv
 
 from autopilot.cleanup import Cleanup
+from autopilot.fix_pr import FixPR
 from autopilot.engine import Engine
 from autopilot.flagsmith_client import FlagsmithClient, FlagsmithError
 from autopilot.github_client import GitHubClient, GitHubError
@@ -35,6 +36,7 @@ from autopilot.llm import GroqClient
 from autopilot.policy import TIERS, describe, for_tier
 from autopilot.pr_handler import PRHandler, git_pull
 from autopilot.pr_notifier import PRNotifier
+from autopilot.report import ReleaseReporter, build as build_report
 from autopilot.server import create_app
 from autopilot.store import Store
 
@@ -68,7 +70,7 @@ def serve(store, port, github_secret=None, github_repo=None, engine=None):
 
 def run_bot(engine, store, port, tick_seconds):
     settings = github_settings()
-    handler = gh = llm = cleanup = None
+    handler = gh = llm = cleanup = reporter = fixes = None
     if settings:
         token, repo, secret, approvers = settings
         gh = GitHubClient(token, repo)
@@ -79,7 +81,10 @@ def run_bot(engine, store, port, tick_seconds):
             print("AI: GROQ_API_KEY not set; PRs will get 'couldn't auto-flag' instead of a plan")
         engine.notify = PRNotifier(store, gh, llm)
         cleanup = Cleanup(store, gh, engine.fs, git_pull, approvers=approvers)
-        handler = PRHandler(store, gh, approvers, llm=llm, fs=engine.fs, engine=engine, cleanup=cleanup)
+        reporter = ReleaseReporter(store, gh, llm)
+        fixes = FixPR(store, gh, approvers=approvers)
+        handler = PRHandler(store, gh, approvers, llm=llm, fs=engine.fs, engine=engine, cleanup=cleanup,
+                            fixes=fixes)
         server = serve(store, port, github_secret=secret, github_repo=repo, engine=engine)
         print(f"GitHub: watching {repo}; approvers: {', '.join(approvers) or 'NONE (nobody can approve)'}")
         print(f"        webhook endpoint http://127.0.0.1:{port}/webhooks/github "
@@ -104,6 +109,10 @@ def run_bot(engine, store, port, tick_seconds):
                 print(f"Flagsmith error, will retry: {e}")
             if cleanup:
                 cleanup.tick()  # handles its own GitHub/Flagsmith errors
+            if fixes:
+                fixes.tick()  # handles its own GitHub errors
+            if reporter:
+                reporter.tick()  # handles its own GitHub errors
             idle = not store.active_releases()
             if idle and not idle_reported:
                 print("No active releases. Waiting (Ctrl+C to stop)...")
@@ -134,6 +143,30 @@ def print_status(store, flag=None):
             print(f"   {time.strftime('%H:%M:%S', time.localtime(e['ts']))}  {e['message']}")
 
 
+def print_report(store, pr_number, post):
+    release = store.release_for_pr(pr_number)
+    if not release:
+        print(f"No release for PR #{pr_number}.")
+        return
+    if release["state"] not in ("completed", "rolled_back"):
+        print(f"PR #{pr_number}'s release is {release['state']}; a report is made once it completes or is switched off.")
+        return
+    try:
+        llm = GroqClient.from_env()  # 1 Groq request, for the two opening sentences
+    except (RuntimeError, ValueError):
+        llm = None
+    body = build_report(store, release, llm)
+    print(body)
+    if post:
+        settings = github_settings()
+        if not settings:
+            print("\nNot posted: GitHub isn't configured in .env.")
+            return
+        with GitHubClient(settings[0], settings[1]) as gh:
+            ReleaseReporter(store, gh, since=0, log=lambda m: None).post(release, body)  # exactly what was printed
+        print(f"\nPosted on PR #{pr_number}.")
+
+
 def main():
     p = argparse.ArgumentParser(prog="python -m autopilot", description="Release Autopilot (CLI)")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -149,6 +182,9 @@ def main():
         sp.add_argument("flag")
     st = sub.add_parser("status", help="show releases and recent events")
     st.add_argument("flag", nargs="?")
+    rp = sub.add_parser("report", help="print a PR's release report (add --post to post it on the PR)")
+    rp.add_argument("pr", type=int, help="the PR number of the release")
+    rp.add_argument("--post", action="store_true", help="post it as a comment on the PR")
     for sp in sub.choices.values():
         sp.add_argument("--port", type=int, default=8000)
         sp.add_argument("--tick", type=float, default=5.0, help="engine tick in seconds")
@@ -158,6 +194,9 @@ def main():
     store = Store(DB_PATH)
     if args.cmd == "status":
         print_status(store, args.flag)
+        return
+    if args.cmd == "report":
+        print_report(store, args.pr, args.post)
         return
 
     user = getpass.getuser()

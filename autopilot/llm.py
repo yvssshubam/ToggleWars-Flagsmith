@@ -518,3 +518,28 @@ def validate_diagnosis(raw, lines, samples):
         return result
     except (AttributeError, TypeError) as e:
         return Diagnosis(available=False, error=f"the AI's answer had the wrong shape: {e}")
+
+
+# --- 4. release report summary --------------------------------------------------------
+
+REPORT_SCHEMA = _obj({"summary": {"type": "string"}})
+
+REPORT_SYSTEM = """You write the opening of a release report on a pull request.
+Write exactly two plain sentences for a busy reviewer: what was released (or why it was
+switched off) and how it went. Do not write any numbers, percentages, times or counts:
+the report shows those separately, computed by code. Put code identifiers in backticks."""
+
+
+def release_summary(llm, facts, fallback):
+    """Two sentences of wording for the report. `facts` holds words only. Returns
+    (text, from_ai); falls back to `fallback` (written by code) on any problem."""
+    if llm is None:
+        return fallback, False
+    try:
+        raw = llm.chat_json(REPORT_SYSTEM, json.dumps(facts), "release_summary", REPORT_SCHEMA)
+    except LLMError:
+        return fallback, False
+    text = _text(raw.get("summary"), 500)
+    if not text or _has_numbers(text):
+        return fallback, False
+    return text, True
