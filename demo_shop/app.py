@@ -64,11 +64,24 @@ def create_app(**setup_overrides):
 
     @app.post("/checkout")
     def checkout(cart: Cart):
+        """Shows the shopper the price of the cart."""
+        autopilot_sdk.track("checkout")
         try:
             total = calculate_total([item.model_dump() for item in cart.items])
         except UnknownItem as e:
             raise HTTPException(status_code=400, detail=f"unknown item: {e}")
         return {"total": total}
+
+    @app.post("/order")
+    def order(cart: Cart):
+        """Places the order (the shopper accepted the price). Re-prices the cart,
+        so the same flag answer tags it with the path the shopper saw."""
+        autopilot_sdk.track("order")
+        try:
+            total = calculate_total([item.model_dump() for item in cart.items])
+        except UnknownItem as e:
+            raise HTTPException(status_code=400, detail=f"unknown item: {e}")
+        return {"ordered": True, "total": total}
 
     return app
 

@@ -89,6 +89,9 @@ class Store:
         for name, kind in ADDED_COLUMNS.items():
             if name not in have:
                 self.db.execute(f"ALTER TABLE releases ADD COLUMN {name} {kind}")
+        if "event" not in {r["name"] for r in self.db.execute("PRAGMA table_info(metrics)")}:
+            # Business events (step 12): "checkout" / "order", tagged by the app with autopilot_sdk.track().
+            self.db.execute("ALTER TABLE metrics ADD COLUMN event TEXT")
 
     def close(self):
         self.db.close()
@@ -234,7 +237,7 @@ class Store:
                 rows.append((
                     float(e["ts"]), str(e["flag"]), str(e["path"]), int(bool(e["ok"])),
                     float(e["latency_ms"]), e.get("error_type"), e.get("error_message"),
-                    e.get("error_where"),
+                    e.get("error_where"), str(e["event"])[:40] if e.get("event") else None,
                 ))
             except (KeyError, TypeError, ValueError):
                 continue  # skip malformed events rather than reject the batch
@@ -242,8 +245,19 @@ class Store:
         if rows:
             self.db.executemany(
                 "INSERT INTO metrics (ts, flag, path, ok, latency_ms, error_type, error_message,"
-                " error_where) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", rows)
+                " error_where, event) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", rows)
         return len(rows)
+
+    def event_counts(self, flag, since, until=None):
+        """{(path, event): count} for tagged business events. An order only counts if it succeeded."""
+        sql = ("SELECT path, event, COUNT(*) AS n FROM metrics WHERE flag = ? AND ts >= ? AND event IS NOT NULL"
+               " AND (event != 'order' OR ok = 1)")
+        args = [flag, since]
+        if until is not None:
+            sql += " AND ts < ?"
+            args.append(until)
+        rows = self.db.execute(sql + " GROUP BY path, event", args)
+        return {(r["path"], r["event"]): r["n"] for r in rows}
 
     def metrics_since(self, flag, since, path=None):
         sql = "SELECT * FROM metrics WHERE flag = ? AND ts >= ?"

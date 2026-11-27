@@ -9,6 +9,7 @@ the engine can't disagree.
 import json
 import re
 
+from autopilot import experiment
 from autopilot.engine import STAGE_LABEL, judge
 from autopilot.health import path_stats
 from autopilot.policy import Policy
@@ -87,7 +88,13 @@ def summary(store, release, clock, repo=None):
                    "max_error_rate_pct": policy.max_error_rate_pct,
                    "max_error_increase_pp": policy.max_error_increase_pp, "max_p95_ratio": policy.max_p95_ratio},
         "gate": None, "diagnosis": _diagnosis(events),
+        "success_metric": plan.get("success_metric") or None,
     }
+    conv = experiment.for_release(store, release)
+    out["conversion"] = conv.to_dict() if conv else None
+    if conv:
+        out["conversion"]["min_per_path"] = experiment.MIN_PER_PATH
+        out["conversion"]["summary"] = experiment.summary_line(conv)
     if state in LIVE_STATES and release.get("stage_started_at"):
         verdict = judge(store, release, policy)
         out["gate"] = {

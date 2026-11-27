@@ -17,11 +17,11 @@ the Organisation API key the bot uses.
 
 from flagsmith import Flagsmith
 
-from .flags import clear_client, flag_on, set_client
+from .flags import clear_client, flag_on, set_client, track
 from .middleware import AutopilotMiddleware
 from .reporter import Reporter
 
-__all__ = ["flag_on", "setup", "Autopilot", "Reporter"]
+__all__ = ["flag_on", "track", "setup", "Autopilot", "Reporter"]
 
 
 class Autopilot:

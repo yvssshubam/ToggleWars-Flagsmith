@@ -187,6 +187,34 @@ function verdictText(r, g) {
                                                        : `Moving on to ${next} at the next check.`}`;
 }
 
+function conversionHtml(r) {
+  const c = r.conversion;
+  if (!c || (!c.new_checkouts && !c.old_checkouts)) return "";
+  const frozen = ["full", "released", "cleanup_pr_open", "cleanup_merged", "completed"].includes(r.state);
+  const head = `<h4>Does it help? Checkout conversion ${frozen ? "(new vs old, until the release to everyone)" : "(new vs old, live)"}</h4>`;
+  const note = `<p class="note">Orders ÷ checkouts per path since the rollout started, two-proportion z-test.
+    Computed by Release Autopilot from the shop's own events, not by Flagsmith Experimentation.
+    Evidence for the approver; it never approves or blocks anything.</p>`;
+  if (!c.enough) {
+    const have = Math.min(c.new_checkouts, c.old_checkouts);
+    return `${head}<div class="grid"><div class="tile"><div class="k">Not enough data yet</div>
+      <div class="v">${have} <small>/ ${c.min_per_path} checkouts on the smaller path</small></div>
+      <div class="bar"><div style="width:${Math.min(100, 100 * have / c.min_per_path)}%"></div></div></div></div>${note}`;
+  }
+  const cls = c.verdict === "better" ? "pass" : c.verdict === "worse" ? "fail" : "wait";
+  const word = {better: "The new path converts better (statistically significant).",
+                worse: "The new path converts worse (statistically significant).",
+                no_difference: "No significant difference so far."}[c.verdict];
+  const p = c.p_value < 0.001 ? "p < 0.001" : `p = ${c.p_value.toFixed(3)}`;
+  const sign = (v) => (v >= 0 ? "+" : "") + v.toFixed(1);
+  return `${head}<div class="grid">
+      <div class="tile"><div class="k">New path</div><div class="v">${c.new_rate.toFixed(1)}% <small>${c.new_orders} / ${c.new_checkouts}</small></div></div>
+      <div class="tile"><div class="k">Old path</div><div class="v">${c.old_rate.toFixed(1)}% <small>${c.old_orders} / ${c.old_checkouts}</small></div></div>
+      <div class="tile"><div class="k">Difference (95% CI)</div><div class="v">${sign(c.diff_pp)} pp <small>${sign(c.ci_low_pp)} to ${sign(c.ci_high_pp)}</small></div></div>
+      <div class="tile"><div class="k">Significance</div><div class="v">${p}</div></div>
+    </div><div class="verdict ${cls}">${word}</div>${note}`;
+}
+
 function actionsHtml(r) {
   if (!r.can_approve && !r.can_switch_off) return "";
   return `<div class="actions">
@@ -259,7 +287,7 @@ function renderDetail(r) {
       <span class="pill ${pillClass(r)}">${esc(r.state_text)}</span><span class="pill">${esc(r.tier)} risk</span>
       ${r.pr_url ? `<a href="${r.pr_url}" target="_blank" rel="noopener">open PR #${r.pr_number} ↗</a>` : ""}</div>
     <div class="subtitle">${esc(sub)}</div>
-    ${stepsHtml(r)}${gateHtml(r)}${actionsHtml(r)}
+    ${stepsHtml(r)}${gateHtml(r)}${actionsHtml(r)}${conversionHtml(r)}
     ${r.series.length ? `
       <div class="legend"><b>━</b> new path &nbsp; <i>┅</i> old path &nbsp; <span style="color:var(--bad)">┄</span> switch-off limit &nbsp;·&nbsp; 10-second buckets; dashed vertical lines mark stage changes</div>
       <div class="charts">
@@ -294,7 +322,7 @@ async function refresh() {
     renderList(releases);
     if (selected != null && releases.length) {
       const r = await (await fetch(`/api/releases/${selected}`)).json();
-      const key = JSON.stringify([r.state, r.gate, r.series.length, r.events.length, r.can_approve, r.can_switch_off]);
+      const key = JSON.stringify([r.state, r.gate, r.conversion, r.series.length, r.events.length, r.can_approve, r.can_switch_off]);
       if (key !== lastDetailKey || !$("errChart")) { if (!busy) renderDetail(r); lastDetailKey = key; }
     }
     lastOk = Date.now();

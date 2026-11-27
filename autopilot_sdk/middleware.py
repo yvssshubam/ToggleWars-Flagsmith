@@ -87,6 +87,8 @@ class AutopilotMiddleware:
                     "latency_ms": round(latency_ms, 2),
                     "ts": now,
                 }
+                if ctx.event:
+                    event["event"] = ctx.event
                 if not ok:
                     event.update(error or {"error_type": f"HTTP {status['code']}",
                                            "error_message": "", "error_where": None})

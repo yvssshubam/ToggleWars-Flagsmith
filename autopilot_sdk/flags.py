@@ -26,6 +26,8 @@ class RequestContext:
     # A mutable dict, so answers recorded in a threadpool (sync endpoints)
     # are still visible to the middleware afterwards.
     flags: dict = field(default_factory=dict)
+    # A business event this request stands for ("checkout", "order"), set by track().
+    event: str | None = None
 
 
 def set_client(client):
@@ -39,6 +41,17 @@ def clear_client(client):
     global _client
     if _client is client:
         _client = None
+
+
+def track(event):
+    """Tag the current request as a business event, e.g. track("order").
+
+    The middleware adds it to the report for every flag this request asked
+    about, so the bot can compare conversion between the new and old paths.
+    Does nothing outside a request."""
+    ctx = _request.get()
+    if ctx is not None:
+        ctx.event = str(event)
 
 
 def flag_on(name):

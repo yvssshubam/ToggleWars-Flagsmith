@@ -23,19 +23,24 @@ def main():
     p.add_argument("--internal-share", type=float, default=0.10,
                    help="share of requests from staff (default 0.10)")
     p.add_argument("--seed", type=int, default=None, help="random seed, for repeatable runs")
+    p.add_argument("--no-orders", action="store_true",
+                   help="only price carts; never place orders (no conversion data)")
     args = p.parse_args()
 
     if not 0 <= args.internal_share <= 1:
         p.error("--internal-share must be between 0 and 1")
 
-    print(f"Sending {args.rps:g} req/s to {args.url}/checkout as {args.users} users + "
-          f"{args.staff} staff ({args.internal_share:.0%} of requests). Ctrl+C to stop.")
+    print(f"Sending {args.rps:g} checkouts/s to {args.url} as {args.users} users + "
+          f"{args.staff} staff ({args.internal_share:.0%} of requests)"
+          + ("" if args.no_orders else "; shoppers place orders more often when the price is lower")
+          + ". Ctrl+C to stop.")
     started = time.monotonic()
     totals = Window()  # created here so the counts survive Ctrl+C
     try:
         asyncio.run(run(
             args.url, rps=args.rps, duration=args.duration, users=args.users,
-            staff=args.staff, internal_share=args.internal_share, seed=args.seed, total=totals))
+            staff=args.staff, internal_share=args.internal_share, seed=args.seed, total=totals,
+            orders=not args.no_orders))
     except KeyboardInterrupt:
         print("\nstopped")
     print("TOTAL  " + totals.line(max(time.monotonic() - started, 0.001)))

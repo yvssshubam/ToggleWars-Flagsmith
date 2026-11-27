@@ -13,6 +13,7 @@ import json
 import time
 from dataclasses import asdict
 
+from autopilot import experiment
 from autopilot.flagsmith_client import FlagsmithError
 from autopilot.health import PathStats, Verdict, evaluate
 from autopilot.policy import STAGES, Policy, describe
@@ -138,12 +139,18 @@ class Engine:
                         {"new": asdict(verdict.new)})
             return
         if state == "stage_2":
+            # Stage 3.5, "prove it helps": evidence for the human, never a decision.
+            conv = experiment.for_release(self.store, release)
+            policy = self.policy_of(release)
+            warn = bool(conv and conv.verdict == "worse" and policy.tier == "high")
             self.store.update_release(release["id"], state="awaiting_approval",
                                       baseline_old=json.dumps(asdict(verdict.old)))
             self._event(release, "awaiting_approval",
                         "all stages healthy. Release to everyone? Waiting for a human approval "
-                        f"(python -m autopilot approve {release['flag']})",
-                        {"new": asdict(verdict.new), "old": asdict(verdict.old)})
+                        f"(python -m autopilot approve {release['flag']})"
+                        + (f" | {experiment.summary_line(conv)}" if conv else ""),
+                        {"new": asdict(verdict.new), "old": asdict(verdict.old),
+                         "conversion": conv.to_dict() if conv else None, "conversion_warning": warn})
             return
 
         next_state = {"stage_0": "stage_1", "stage_1": "stage_2"}[state]

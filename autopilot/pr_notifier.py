@@ -8,7 +8,7 @@ AI text is the diagnosis, which llm.py has already checked against the diff.
 
 import json
 
-from autopilot import plan_comment
+from autopilot import experiment, plan_comment
 from autopilot.engine import STAGE_LABEL
 from autopilot.health import PathStats
 from autopilot.llm import diagnose
@@ -33,6 +33,34 @@ def stats(d):
         return "no data"
     s = PathStats(**d)
     return f"{s.n} requests, {s.error_rate:.1%} errors, p95 {s.p95_ms:.0f} ms"
+
+
+def conversion_section(conv, warning, plan):
+    """Stage 3.5 evidence for the approval request. Numbers from code; labelled honestly."""
+    title = "**Does it help?** Checkout conversion (orders ÷ checkouts) since the rollout started"
+    source = ("<sub>Computed by Release Autopilot from the shop's own events (two-proportion z-test), "
+              "not by Flagsmith Experimentation. It informs this approval; it doesn't decide it.</sub>")
+    metric = plan.get("success_metric")
+    if metric and "conversion" not in metric.lower():
+        source += f"\n<sub>The plan named \"{metric}\" as the success metric; the bot measures checkout conversion.</sub>"
+    if not conv:
+        return f"{title}: no data.\n\n"
+    c = experiment.Conversion(**conv)
+    if not c.enough:
+        return (f"{title}: **not enough data yet** ({c.new_checkouts} checkouts on the new path, "
+                f"{c.old_checkouts} on the old; at least {experiment.MIN_PER_PATH} each are needed).\n{source}\n\n")
+    verdict = {"better": "✅ **the new path converts better** (statistically significant)",
+               "worse": "⚠️ **the new path converts worse** (statistically significant)",
+               "no_difference": "no significant difference"}[c.verdict]
+    lines = [f"{title}:", "", "| Path | Checkouts | Orders | Conversion |", "|---|---|---|---|",
+             f"| new | {c.new_checkouts} | {c.new_orders} | {c.new_rate:.1f}% |",
+             f"| old | {c.old_checkouts} | {c.old_orders} | {c.old_rate:.1f}% |", "",
+             f"Difference **{c.diff_pp:+.1f} percentage points** (95% CI {c.ci_low_pp:+.1f} to {c.ci_high_pp:+.1f}), "
+             f"{experiment.p_text(c.p_value)}: {verdict}."]
+    if warning:
+        lines += ["", "⚠️ **This is a high-risk release and conversion dropped significantly on the new path.** "
+                      "Check this before approving."]
+    return "\n".join(lines) + f"\n{source}\n\n"
 
 
 class PRNotifier:
@@ -66,7 +94,8 @@ class PRNotifier:
     def _awaiting_approval(self, release, plan, policy, data):
         return ("✅ **All stages healthy. Release to everyone?**\n\n"
                 f"At {STAGE_LABEL['stage_2']}: new path {stats(data.get('new'))}; old path {stats(data.get('old'))}.\n\n"
-                "An approver can comment **`/approve`** to turn the new code on for everyone, or "
+                + conversion_section(data.get("conversion"), data.get("conversion_warning"), plan)
+                + "An approver can comment **`/approve`** to turn the new code on for everyone, or "
                 "`/rollback` to switch it off. Nothing changes until then.")
 
     def _full(self, release, plan, policy, data):
